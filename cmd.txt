@@ -1,0 +1,2 @@
+docker compose --env-file .env.light -f docker-compose.light.yaml down -v
+docker compose --env-file .env.light -f docker-compose.light.yaml up -d
