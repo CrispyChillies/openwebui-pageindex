@@ -140,6 +140,7 @@ class PageIndexChatService:
                     "title": citation.get("title"),
                     "start_index": citation.get("start_index"),
                     "end_index": citation.get("end_index"),
+                    "node_summary": citation.get("node_summary") or citation.get("summary") or "",
                 }
             )
 
@@ -462,6 +463,37 @@ class PageIndexChatService:
         document_id = selected_document.get("document_id") or "pageindex"
         name = selected_document.get("doc_title") or "PageIndex"
 
+        citations = result.get("citations", []) or []
+        evidence_lines = []
+        for citation in citations:
+            if not isinstance(citation, dict):
+                continue
+
+            node_id = citation.get("node_id") or "N/A"
+            title = citation.get("title") or "Untitled node"
+            start = citation.get("start_index", "?")
+            end = citation.get("end_index", "?")
+            summary = (
+                citation.get("node_summary")
+                or citation.get("summary")
+                or ""
+            )
+
+            line = f"[{node_id}] {title} (pages {start}-{end})"
+            if isinstance(summary, str) and summary.strip():
+                line += f"\nSummary: {summary.strip()}"
+            evidence_lines.append(line)
+
+        context_blocks = []
+        if evidence_lines:
+            context_blocks.append("Selected nodes:\n" + "\n\n".join(evidence_lines))
+        else:
+            answer = (result.get("answer") or "").strip()
+            if answer:
+                context_blocks.append("PageIndex grounded draft answer:\n" + answer)
+            else:
+                context_blocks.append("No PageIndex evidence payload was returned.")
+
         return {
             "source": {
                 "type": "pageindex",
@@ -471,13 +503,13 @@ class PageIndexChatService:
                 "file_id": selected_document.get("file_id"),
                 "knowledge_id": selected_document.get("knowledge_id"),
             },
-            "document": [result.get("answer", "")],
+            "document": ["\n\n".join(context_blocks)],
             "metadata": [
                 {
                     "source": f"pageindex:{document_id}",
                     "name": name,
                     "pageindex": {
-                        "citations": result.get("citations", []),
+                        "citations": citations,
                         "retrieved_node_ids": result.get("retrieved_node_ids", []),
                         "evidence_sufficient": result.get("evidence_sufficient", "no"),
                         "used_full_text": result.get("used_full_text", False),

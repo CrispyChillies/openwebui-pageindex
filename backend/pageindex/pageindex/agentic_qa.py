@@ -381,6 +381,7 @@ class AgenticPageIndexQA:
                     "title": str(title),
                     "start_index": cited_start,
                     "end_index": cited_end,
+                    "node_summary": evidence.get("summary", ""),
                 }
             )
 

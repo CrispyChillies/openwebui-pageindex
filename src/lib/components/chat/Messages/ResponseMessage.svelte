@@ -112,6 +112,29 @@
 			usage?: unknown;
 		};
 		annotation?: { type: string; rating: number };
+		pageindex?: {
+			available?: boolean;
+			mode?: string;
+			selected_document?: {
+				document_id?: string;
+				file_id?: string;
+				doc_title?: string;
+			};
+			retrieved_node_ids?: string[];
+			citations?: {
+				node_id?: string;
+				title?: string;
+				start_index?: number | string;
+				end_index?: number | string;
+				node_summary?: string;
+				summary?: string;
+			}[];
+			evidence_sufficient?: string;
+			insufficient_reason?: string;
+			used_full_text?: boolean;
+			summary_enough?: string;
+			full_text_unavailable_reason?: string;
+		};
 	}
 
 	export let chatId = '';
@@ -410,6 +433,47 @@
 	};
 
 	let feedbackLoading = false;
+
+	const getPageIndexPayload = () => {
+		if (message?.pageindex && typeof message.pageindex === 'object') {
+			return message.pageindex;
+		}
+
+		const rawSources = (message?.sources ?? []) as any[];
+		const pageindexSource = rawSources.find((source: any) => {
+			const type = source?.source?.type;
+			return type === 'pageindex';
+		});
+
+		if (!pageindexSource) {
+			return null;
+		}
+
+		const metadata = pageindexSource?.metadata?.[0] ?? {};
+		const pageindex = metadata?.pageindex ?? {};
+
+		return {
+			selected_document: {
+				document_id: pageindexSource?.source?.document_id,
+				file_id: pageindexSource?.source?.file_id,
+				doc_title: pageindexSource?.source?.name
+			},
+			retrieved_node_ids: pageindex?.retrieved_node_ids ?? [],
+			citations: pageindex?.citations ?? [],
+			evidence_sufficient: pageindex?.evidence_sufficient,
+			used_full_text: pageindex?.used_full_text,
+			summary_enough: pageindex?.summary_enough
+		};
+	};
+
+	$: pageIndexPayload = getPageIndexPayload();
+	$: pageIndexRetrievedNodeIds = pageIndexPayload?.retrieved_node_ids ?? [];
+	$: pageIndexCitations = pageIndexPayload?.citations ?? [];
+	$: pageIndexSelectedDocument = pageIndexPayload?.selected_document ?? null;
+	$: pageIndexCitationsWithSummary = pageIndexCitations.map((citation: any) => ({
+		...citation,
+		node_summary: citation?.node_summary ?? citation?.summary ?? ''
+	}));
 
 	const feedbackHandler = async (rating: number | null = null, details: object | null = null) => {
 		feedbackLoading = true;
@@ -823,6 +887,118 @@
 										updateChat();
 									}}
 								/>
+							{/if}
+
+							{#if pageIndexPayload && (pageIndexRetrievedNodeIds.length > 0 || pageIndexCitations.length > 0 || pageIndexSelectedDocument)}
+								<div
+									class="mt-3 rounded-xl border border-sky-200/60 dark:border-sky-800/50 bg-sky-50/60 dark:bg-sky-900/20 p-3"
+								>
+									<div
+										class="text-xs uppercase tracking-wide text-sky-700 dark:text-sky-300 font-semibold"
+									>
+										{$i18n.t('PageIndex Traversal')}
+									</div>
+
+									{#if pageIndexSelectedDocument?.doc_title}
+										<div class="mt-2 text-sm text-gray-800 dark:text-gray-100">
+											<span class="font-medium">{$i18n.t('Document')}:</span>
+											{pageIndexSelectedDocument.doc_title}
+										</div>
+									{/if}
+
+									<div class="mt-2 flex flex-wrap gap-2 text-[11px]">
+										{#if pageIndexPayload?.evidence_sufficient}
+											<div
+												class="px-2 py-0.5 rounded-full bg-white/80 dark:bg-gray-900/70 border border-sky-200 dark:border-sky-900"
+											>
+												{$i18n.t('Evidence')}: {pageIndexPayload.evidence_sufficient}
+											</div>
+										{/if}
+										{#if pageIndexPayload?.summary_enough}
+											<div
+												class="px-2 py-0.5 rounded-full bg-white/80 dark:bg-gray-900/70 border border-sky-200 dark:border-sky-900"
+											>
+												{$i18n.t('Summary enough')}: {pageIndexPayload.summary_enough}
+											</div>
+										{/if}
+										{#if pageIndexPayload?.used_full_text !== undefined}
+											<div
+												class="px-2 py-0.5 rounded-full bg-white/80 dark:bg-gray-900/70 border border-sky-200 dark:border-sky-900"
+											>
+												{$i18n.t('Used full text')}: {pageIndexPayload.used_full_text
+													? 'yes'
+													: 'no'}
+											</div>
+										{/if}
+									</div>
+
+									{#if pageIndexPayload?.insufficient_reason}
+										<div class="mt-2 text-xs text-gray-700 dark:text-gray-300">
+											<span class="font-medium">{$i18n.t('Reason')}:</span>
+											{pageIndexPayload.insufficient_reason}
+										</div>
+									{/if}
+
+									{#if pageIndexPayload?.full_text_unavailable_reason}
+										<div class="mt-1 text-xs text-gray-700 dark:text-gray-300">
+											<span class="font-medium">{$i18n.t('Full-text availability')}:</span>
+											{pageIndexPayload.full_text_unavailable_reason}
+										</div>
+									{/if}
+
+									{#if pageIndexRetrievedNodeIds.length > 0}
+										<details class="mt-3" open>
+											<summary
+												class="cursor-pointer text-sm text-sky-800 dark:text-sky-200 font-medium"
+											>
+												{$i18n.t('Traversed Node IDs')} ({pageIndexRetrievedNodeIds.length})
+											</summary>
+											<div class="mt-2 flex flex-wrap gap-1.5">
+												{#each pageIndexRetrievedNodeIds as nodeId}
+													<div
+														class="text-[11px] px-2 py-0.5 rounded-md bg-white/90 dark:bg-gray-900/80 border border-sky-200 dark:border-sky-900 text-sky-900 dark:text-sky-200"
+													>
+														{nodeId}
+													</div>
+												{/each}
+											</div>
+										</details>
+									{/if}
+
+									{#if pageIndexCitations.length > 0}
+										<details class="mt-3" open>
+											<summary
+												class="cursor-pointer text-sm text-sky-800 dark:text-sky-200 font-medium"
+											>
+												{$i18n.t('Selected Nodes')} ({pageIndexCitationsWithSummary.length})
+											</summary>
+											<div class="mt-2 space-y-1.5">
+												{#each pageIndexCitationsWithSummary as citation}
+													<div
+														class="text-xs rounded-md border border-sky-200 dark:border-sky-900 bg-white/85 dark:bg-gray-900/75 p-2 text-gray-800 dark:text-gray-200"
+													>
+														<div class="font-medium text-sky-800 dark:text-sky-200">
+															[{citation?.node_id ?? 'N/A'}] {citation?.title ??
+																$i18n.t('Untitled node')}
+														</div>
+														{#if citation?.node_summary}
+															<div
+																class="mt-1 text-gray-700 dark:text-gray-300 whitespace-pre-wrap"
+															>
+																<span class="font-medium">{$i18n.t('Node summary')}:</span>
+																{citation.node_summary}
+															</div>
+														{/if}
+														<div class="mt-0.5 text-gray-600 dark:text-gray-400">
+															{$i18n.t('Pages')}: {citation?.start_index ?? '?'} - {citation?.end_index ??
+																'?'}
+														</div>
+													</div>
+												{/each}
+											</div>
+										</details>
+									{/if}
+								</div>
 							{/if}
 
 							{#if message?.error}

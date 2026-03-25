@@ -45,7 +45,7 @@ class PageIndexService:
         if source_type == "pdf":
             options.setdefault("if_add_node_id", "yes")
             options.setdefault("if_add_node_summary", "yes")
-            options.setdefault("if_add_doc_description", "no")
+            options.setdefault("if_add_doc_description", "yes")
             options.setdefault("if_add_node_text", "no")
             options.setdefault("toc_check_page_num", 20)
             options.setdefault("max_page_num_each_node", 10)
@@ -53,7 +53,7 @@ class PageIndexService:
         else:
             options.setdefault("if_add_node_id", "yes")
             options.setdefault("if_add_node_summary", "yes")
-            options.setdefault("if_add_doc_description", "no")
+            options.setdefault("if_add_doc_description", "yes")
             options.setdefault("if_add_node_text", "no")
             options.setdefault("if_thinning", False)
             options.setdefault("min_token_threshold", 5000)
@@ -96,7 +96,7 @@ class PageIndexService:
                 if_add_node_summary=index_options.get("if_add_node_summary", "yes"),
                 summary_token_threshold=index_options.get("summary_token_threshold", 200),
                 model=index_options.get("model"),
-                if_add_doc_description=index_options.get("if_add_doc_description", "no"),
+                if_add_doc_description=index_options.get("if_add_doc_description", "yes"),
                 if_add_node_text=index_options.get("if_add_node_text", "no"),
                 if_add_node_id=index_options.get("if_add_node_id", "yes"),
             )

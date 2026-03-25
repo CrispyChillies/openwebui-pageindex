@@ -17,7 +17,8 @@ import yaml
 from pathlib import Path
 from types import SimpleNamespace as config
 
-CHATGPT_API_KEY = os.getenv("CHATGPT_API_KEY")
+CHATGPT_API_KEY = os.getenv("CHATGPT_API_KEY") or os.getenv("OPENAI_API_KEY")
+OPENAI_BASE_URL = os.getenv("OPENAI_API_BASE_URL")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 QWEN_API_KEY = os.getenv("QWEN_API_KEY", "EMPTY")
 QWEN_BASE_URL = os.environ.get("QWEN_BASE_URL", "https://llm-le79mk8i-8000.serverless.fptcloud.com/v1")
@@ -31,7 +32,10 @@ def get_client_args(model, is_async=False):
         return {"api_key": QWEN_API_KEY, "base_url": QWEN_BASE_URL, "http_client": http_client}
     if model.startswith("llama") or model.startswith("mixtral") or model.startswith("gemma"):
         return {"api_key": GROQ_API_KEY, "base_url": "https://api.groq.com/openai/v1"}
-    return {"api_key": CHATGPT_API_KEY}
+    client_args = {"api_key": CHATGPT_API_KEY}
+    if OPENAI_BASE_URL:
+        client_args["base_url"] = OPENAI_BASE_URL
+    return client_args
 
 def count_tokens(text, model=None):
     if not text:

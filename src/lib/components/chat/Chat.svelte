@@ -83,7 +83,8 @@
 		chatAction,
 		generateMoACompletion,
 		stopTask,
-		getTaskIdsByChatId
+		getTaskIdsByChatId,
+		getModels
 	} from '$lib/apis';
 	import { getTools } from '$lib/apis/tools';
 	import { uploadFile } from '$lib/apis/files';
@@ -667,6 +668,22 @@
 	onMount(() => {
 		loading = true;
 		console.log('mounted');
+
+		if ($models.length === 0) {
+			getModels(
+				localStorage.token,
+				$config?.features?.enable_direct_connections ? ($settings?.directConnections ?? null) : null
+			)
+				.then((loadedModels) => {
+					if (loadedModels?.length) {
+						models.set(loadedModels);
+					}
+				})
+				.catch((error) => {
+					console.error('Failed to lazily load models in chat view:', error);
+				});
+		}
+
 		window.addEventListener('message', onMessageHandler);
 		$socket?.on('events', chatEventHandler);
 
@@ -1446,10 +1463,13 @@
 
 	const createMessagePair = async (userPrompt) => {
 		messageInput?.setText('');
-		if (selectedModels.length === 0) {
+		const currentSelectedModelIds =
+			atSelectedModel !== undefined ? [atSelectedModel.id] : selectedModels.filter((id) => id);
+
+		if (currentSelectedModelIds.length === 0) {
 			toast.error($i18n.t('Model not selected'));
 		} else {
-			const modelId = selectedModels[0];
+			const modelId = currentSelectedModelIds[0];
 			const model = $models.filter((m) => m.id === modelId).at(0);
 
 			if (!model) {

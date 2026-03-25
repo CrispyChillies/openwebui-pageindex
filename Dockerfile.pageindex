@@ -1,0 +1,122 @@
+# syntax=docker/dockerfile:1
+
+ARG USE_CUDA=false
+ARG USE_CUDA_VER=cu128
+ARG USE_SLIM=false
+ARG USE_PERMISSION_HARDENING=false
+ARG BUILD_HASH=pageindex-dev
+ARG UID=0
+ARG GID=0
+ARG HF_TOKEN
+
+FROM --platform=$BUILDPLATFORM node:22-alpine3.20 AS build
+ARG BUILD_HASH
+
+ENV NODE_OPTIONS="--max-old-space-size=8192"
+
+WORKDIR /app
+
+RUN apk add --no-cache git
+
+COPY package.json package-lock.json ./
+RUN npm ci --force
+
+COPY . .
+ENV APP_BUILD_HASH=${BUILD_HASH}
+RUN NODE_OPTIONS=--max-old-space-size=4096 npm run build
+
+FROM python:3.11.14-slim-bookworm AS runtime
+
+ARG USE_CUDA
+ARG USE_CUDA_VER
+ARG USE_SLIM
+ARG USE_PERMISSION_HARDENING
+ARG UID
+ARG GID
+ARG BUILD_HASH
+ARG HF_TOKEN
+
+ENV PYTHONUNBUFFERED=1 \
+    ENV=prod \
+    PORT=8080 \
+    HOST=0.0.0.0 \
+    OPENWEBUI_APP_MODE=pageindex \
+    DOCKER=true \
+    WEBUI_BUILD_VERSION=${BUILD_HASH} \
+    HOME=/root \
+    USE_CUDA_DOCKER=${USE_CUDA} \
+    USE_SLIM_DOCKER=${USE_SLIM} \
+    USE_CUDA_DOCKER_VER=${USE_CUDA_VER} \
+    OLLAMA_BASE_URL=/ollama \
+    OPENAI_API_BASE_URL=https://api.openai.com/v1 \
+    OPENAI_BASE_URL=https://api.openai.com/v1 \
+    OPENAI_API_KEY= \
+    CHATGPT_API_KEY= \
+    HF_TOKEN=${HF_TOKEN} \
+    PAGEINDEX_QA_MODEL=gpt-4o-mini \
+    SCARF_NO_ANALYTICS=true \
+    DO_NOT_TRACK=true \
+    ANONYMIZED_TELEMETRY=false \
+    WHISPER_MODEL=base \
+    WHISPER_MODEL_DIR=/app/backend/data/cache/whisper/models \
+    SENTENCE_TRANSFORMERS_HOME=/app/backend/data/cache/embedding/models \
+    TIKTOKEN_ENCODING_NAME=cl100k_base \
+    TIKTOKEN_CACHE_DIR=/app/backend/data/cache/tiktoken \
+    HF_HOME=/app/backend/data/cache/embedding/models
+
+WORKDIR /app/backend
+
+RUN if [ "$UID" -ne 0 ]; then \
+    if [ "$GID" -ne 0 ]; then addgroup --gid "$GID" app; fi; \
+    adduser --uid "$UID" --gid "$GID" --home "$HOME" --disabled-password --no-create-home app; \
+    fi
+
+RUN mkdir -p "$HOME/.cache/chroma" && \
+    echo -n 00000000-0000-0000-0000-000000000000 > "$HOME/.cache/chroma/telemetry_user_id"
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    git build-essential pandoc gcc netcat-openbsd curl jq \
+    python3-dev ffmpeg libsm6 libxext6 zstd && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY ./backend/requirements.txt ./requirements.txt
+COPY ./backend/pageindex/requirements.txt ./pageindex-requirements.txt
+
+RUN pip3 install --no-cache-dir uv && \
+    if [ "$USE_CUDA" = "true" ]; then \
+    pip3 install 'torch<=2.9.1' torchvision torchaudio --index-url "https://download.pytorch.org/whl/$USE_CUDA_DOCKER_VER" --no-cache-dir; \
+    else \
+    pip3 install 'torch<=2.9.1' torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --no-cache-dir; \
+    fi && \
+    uv pip install --system -r requirements.txt --no-cache-dir && \
+    uv pip install --system -r pageindex-requirements.txt --no-cache-dir && \
+    if [ "$USE_SLIM" != "true" ]; then \
+    python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device='cpu')" && \
+    python -c "import os; from faster_whisper import WhisperModel; WhisperModel(os.environ['WHISPER_MODEL'], device='cpu', compute_type='int8', download_root=os.environ['WHISPER_MODEL_DIR'])" && \
+    python -c "import os; import tiktoken; tiktoken.get_encoding(os.environ['TIKTOKEN_ENCODING_NAME'])" && \
+    python -c "import nltk; nltk.download('punkt_tab')"; \
+    fi && \
+    mkdir -p /app/backend/data && \
+    chown -R "$UID:$GID" /app "$HOME"
+
+COPY --chown=$UID:$GID --from=build /app/build /app/build
+COPY --chown=$UID:$GID --from=build /app/CHANGELOG.md /app/CHANGELOG.md
+COPY --chown=$UID:$GID --from=build /app/package.json /app/package.json
+COPY --chown=$UID:$GID ./backend .
+
+EXPOSE 8080
+
+HEALTHCHECK CMD curl --silent --fail http://localhost:${PORT:-8080}/health | jq -ne 'input.status == true' || exit 1
+
+RUN if [ "$USE_PERMISSION_HARDENING" = "true" ]; then \
+    set -eux; \
+    chgrp -R 0 /app /root || true; \
+    chmod -R g+rwX /app /root || true; \
+    find /app -type d -exec chmod g+s {} + || true; \
+    find /root -type d -exec chmod g+s {} + || true; \
+    fi
+
+USER $UID:$GID
+
+CMD ["bash", "start.sh"]

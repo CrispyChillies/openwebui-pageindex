@@ -1,0 +1,29 @@
+services:
+  open-webui-pageindex:
+    build:
+      context: .
+      dockerfile: Dockerfile.pageindex
+      args:
+        HF_TOKEN: "${HF_TOKEN-}"
+    image: openwebui-pageindex:local
+    container_name: open-webui-pageindex
+    ports:
+      - "${OPEN_WEBUI_PORT-3000}:8080"
+    volumes:
+      - open-webui-pageindex:/app/backend/data
+    environment:
+      OPENWEBUI_APP_MODE: pageindex
+      WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY-}"
+      OPENAI_API_BASE_URL: "${OPENAI_BASE_URL-https://api.openai.com/v1}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL-https://api.openai.com/v1}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY-}"
+      CHATGPT_API_KEY: "${OPENAI_API_KEY-}"
+      HF_TOKEN: "${HF_TOKEN-}"
+      PAGEINDEX_QA_MODEL: "${PAGEINDEX_QA_MODEL-gpt-4o-mini}"
+      ENABLE_SIGNUP: "${ENABLE_SIGNUP-true}"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped
+
+volumes:
+  open-webui-pageindex: {}
