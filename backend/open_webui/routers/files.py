@@ -45,11 +45,13 @@ from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.routers.audio import transcribe
 
 from open_webui.storage.provider import Storage
+from open_webui.retrieval.pageindex_service import PageIndexing
 
 
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import strict_match_mime_type
+from open_webui.utils.app_mode import is_pageindex_mode
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -164,6 +166,81 @@ def process_uploaded_file(
             _process_handler(db_session)
 
 
+def process_uploaded_file_pageindex(
+    file_item,
+    knowledge_id: Optional[str] = None,
+    db: Optional[Session] = None,
+):
+    def _process_handler(db_session):
+        try:
+            Files.update_file_data_by_id(
+                file_item.id,
+                {
+                    "status": "processing",
+                    "source": "pageindex",
+                },
+                db=db_session,
+            )
+
+            result = PageIndexing.index_file_by_id(
+                file_id=file_item.id,
+                knowledge_id=knowledge_id,
+                force_reindex=False,
+            )
+
+            if result and result.status == "ready":
+                Files.update_file_data_by_id(
+                    file_item.id,
+                    {
+                        "status": "completed",
+                        "pageindex": {
+                            "status": result.status,
+                            "document_id": result.document_id,
+                            "message": result.message,
+                            "indexed": bool(result.indexed),
+                            "skipped": bool(result.skipped),
+                        },
+                    },
+                    db=db_session,
+                )
+            else:
+                Files.update_file_data_by_id(
+                    file_item.id,
+                    {
+                        "status": "failed",
+                        "error": result.message if result else "PageIndex indexing failed",
+                        "pageindex": {
+                            "status": result.status if result else "failed",
+                            "document_id": result.document_id if result else None,
+                            "message": result.message if result else "PageIndex indexing failed",
+                            "indexed": bool(result.indexed) if result else False,
+                            "skipped": bool(result.skipped) if result else False,
+                        },
+                    },
+                    db=db_session,
+                )
+        except Exception as e:
+            log.exception(f"Error processing file with PageIndex: {file_item.id}")
+            Files.update_file_data_by_id(
+                file_item.id,
+                {
+                    "status": "failed",
+                    "error": str(e),
+                    "pageindex": {
+                        "status": "failed",
+                        "message": str(e),
+                    },
+                },
+                db=db_session,
+            )
+
+    if db:
+        _process_handler(db)
+    else:
+        with SessionLocal() as db_session:
+            _process_handler(db_session)
+
+
 @router.post("/", response_model=FileModelResponse)
 def upload_file(
     request: Request,
@@ -197,6 +274,13 @@ def upload_file_handler(
     background_tasks: Optional[BackgroundTasks] = None,
     db: Optional[Session] = None,
 ):
+    pageindex_mode = is_pageindex_mode(request)
+    pageindex_process = bool(process and pageindex_mode)
+
+    if process and is_pageindex_mode(request):
+        # In pageindex mode, skip legacy retrieval indexing pipeline on upload.
+        process = False
+
     log.info(f"file.content_type: {file.content_type} {process}")
 
     if isinstance(metadata, str):
@@ -253,7 +337,11 @@ def upload_file_handler(
                     "filename": name,
                     "path": file_path,
                     "data": {
-                        **({"status": "pending"} if process else {}),
+                        **(
+                            {"status": "pending", "source": "pageindex"}
+                            if pageindex_process
+                            else ({"status": "pending"} if process else {})
+                        ),
                     },
                     "meta": {
                         "name": name,
@@ -278,6 +366,27 @@ def upload_file_handler(
                 Channels.add_file_to_channel_by_id(
                     channel.id, file_item.id, user.id, db=db
                 )
+
+        if pageindex_process:
+            knowledge_id = None
+            if isinstance(file_metadata, dict):
+                knowledge_id = file_metadata.get("knowledge_id")
+
+            if background_tasks and process_in_background:
+                background_tasks.add_task(
+                    process_uploaded_file_pageindex,
+                    file_item,
+                    knowledge_id,
+                )
+                return {"status": True, **file_item.model_dump()}
+            else:
+                process_uploaded_file_pageindex(
+                    file_item,
+                    knowledge_id,
+                    db,
+                )
+                file_item = Files.get_file_by_id(file_item.id, db=db)
+                return {"status": True, **file_item.model_dump()}
 
         if process:
             if background_tasks and process_in_background:

@@ -71,6 +71,8 @@ from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 
 from open_webui.retrieval.utils import get_sources_from_items
+from open_webui.retrieval.pageindex_chat import PageIndexChat
+from open_webui.utils.app_mode import is_pageindex_mode
 
 
 from open_webui.utils.sanitize import sanitize_code
@@ -1814,13 +1816,16 @@ async def chat_completion_files_handler(
 ) -> tuple[dict, dict[str, list]]:
     __event_emitter__ = extra_params["__event_emitter__"]
     sources = []
+    pageindex_result = None
+    pageindex_error = None
+    pageindex_only_mode = is_pageindex_mode(request)
 
     if files := body.get("metadata", {}).get("files", None):
         # Check if all files are in full context mode
         all_full_context = all(item.get("context") == "full" for item in files)
 
         queries = []
-        if not all_full_context:
+        if not all_full_context and not pageindex_only_mode:
             try:
                 queries_response = await generate_queries(
                     request,
@@ -1864,35 +1869,95 @@ async def chat_completion_files_handler(
         if len(queries) == 0:
             queries = [get_last_user_message(body["messages"])]
 
-        try:
-            # Directly await async get_sources_from_items (no thread needed - fully async now)
-            sources = await get_sources_from_items(
-                request=request,
-                items=files,
-                queries=queries,
-                embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
-                    query, prefix=prefix, user=user
-                ),
-                k=request.app.state.config.TOP_K,
-                reranking_function=(
-                    (
-                        lambda query, documents: request.app.state.RERANKING_FUNCTION(
-                            query, documents, user=user
+        if not pageindex_only_mode:
+            try:
+                # Directly await async get_sources_from_items (no thread needed - fully async now)
+                sources = await get_sources_from_items(
+                    request=request,
+                    items=files,
+                    queries=queries,
+                    embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                        query, prefix=prefix, user=user
+                    ),
+                    k=request.app.state.config.TOP_K,
+                    reranking_function=(
+                        (
+                            lambda query, documents: request.app.state.RERANKING_FUNCTION(
+                                query, documents, user=user
+                            )
                         )
+                        if request.app.state.RERANKING_FUNCTION
+                        else None
+                    ),
+                    k_reranker=request.app.state.config.TOP_K_RERANKER,
+                    r=request.app.state.config.RELEVANCE_THRESHOLD,
+                    hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
+                    hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+                    full_context=all_full_context
+                    or request.app.state.config.RAG_FULL_CONTEXT,
+                    user=user,
+                )
+            except Exception as e:
+                log.exception(e)
+
+        try:
+            query_text = get_last_user_message(body.get("messages", []))
+            if query_text:
+                pageindex_result = await asyncio.to_thread(
+                    PageIndexChat.query_for_chat_items,
+                    query_text,
+                    files,
+                    user,
+                    True,
+                    False,
+                    5,
+                    3,
+                    None,
+                )
+                pageindex_source = PageIndexChat.to_chat_source(pageindex_result)
+                if pageindex_source:
+                    sources.append(pageindex_source)
+                elif pageindex_only_mode:
+                    pageindex_error = (
+                        pageindex_result.get("error") if isinstance(pageindex_result, dict) else None
+                    ) or "No PageIndex answer was produced for the selected documents."
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "action": "pageindex_query",
+                                "description": pageindex_error,
+                                "done": True,
+                            },
+                        }
                     )
-                    if request.app.state.RERANKING_FUNCTION
-                    else None
-                ),
-                k_reranker=request.app.state.config.TOP_K_RERANKER,
-                r=request.app.state.config.RELEVANCE_THRESHOLD,
-                hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
-                hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
-                full_context=all_full_context
-                or request.app.state.config.RAG_FULL_CONTEXT,
-                user=user,
-            )
         except Exception as e:
-            log.exception(e)
+            log.debug(f"PageIndex chat retrieval skipped due to error: {e}")
+            if pageindex_only_mode:
+                pageindex_error = str(e)
+
+        if pageindex_only_mode and not pageindex_result:
+            pageindex_error = pageindex_error or "PageIndex could not run for selected documents."
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "action": "pageindex_query",
+                        "description": pageindex_error,
+                        "done": True,
+                    },
+                }
+            )
+
+        if pageindex_only_mode and pageindex_error:
+            system_message = (
+                "<context>PageIndex mode is enabled. Local document answers must come only from "
+                "PageIndex retrieval. No PageIndex evidence is available right now. "
+                f"Reason: {pageindex_error}. "
+                "Tell the user to wait for indexing or select indexed documents. "
+                "Do not invent document-grounded claims.</context>"
+            )
+            body["messages"] = add_or_update_system_message(system_message, body["messages"])
 
         log.debug(f"rag_contexts:sources: {sources}")
 
@@ -1926,7 +1991,14 @@ async def chat_completion_files_handler(
             }
         )
 
-    return body, {"sources": sources}
+    pageindex_payload = None
+    if isinstance(pageindex_result, dict):
+        pageindex_payload = {
+            **pageindex_result,
+            "mode": "pageindex" if pageindex_only_mode else "default",
+        }
+
+    return body, {"sources": sources, "pageindex": pageindex_payload}
 
 
 def apply_params_to_form_data(form_data, model):
@@ -2641,6 +2713,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 request, form_data, extra_params, user
             )
             sources.extend(flags.get("sources", []))
+            if flags.get("pageindex"):
+                events.append({"pageindex": flags.get("pageindex")})
         except Exception as e:
             log.exception(e)
 

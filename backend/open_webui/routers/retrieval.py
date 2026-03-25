@@ -90,6 +90,10 @@ from open_webui.retrieval.utils import (
     query_doc,
     query_doc_with_hybrid_search,
 )
+from open_webui.retrieval.pageindex_service import PageIndexing
+from open_webui.retrieval.pageindex_chat import PageIndexChat
+from open_webui.storage.pageindex import PageIndexes
+from open_webui.models.access_grants import AccessGrants
 from open_webui.retrieval.vector.utils import filter_metadata
 from open_webui.utils.misc import (
     calculate_sha256_string,
@@ -2604,6 +2608,32 @@ class QueryCollectionsForm(BaseModel):
     enable_enriched_texts: Optional[bool] = None
 
 
+class PageIndexIndexForm(BaseModel):
+    file_id: str
+    knowledge_id: Optional[str] = None
+    force_reindex: Optional[bool] = False
+    index_options: Optional[dict] = None
+
+
+class PageIndexSearchCandidatesForm(BaseModel):
+    query: str
+    file_ids: Optional[list[str]] = None
+    knowledge_id: Optional[str] = None
+    limit: Optional[int] = 10
+
+
+class PageIndexQueryForm(BaseModel):
+    query: str
+    file_id: Optional[str] = None
+    file_ids: Optional[list[str]] = None
+    knowledge_id: Optional[str] = None
+    auto_index: Optional[bool] = True
+    force_reindex: Optional[bool] = False
+    candidate_limit: Optional[int] = 5
+    max_documents: Optional[int] = 3
+    qa_model: Optional[str] = None
+
+
 @router.post("/query/collection")
 async def query_collection_handler(
     request: Request,
@@ -2666,6 +2696,197 @@ async def query_collection_handler(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.DEFAULT(e),
         )
+
+
+@router.post("/pageindex/index")
+async def pageindex_index_file(
+    form_data: PageIndexIndexForm,
+    user=Depends(get_verified_user),
+):
+    if not has_access_to_file(form_data.file_id, "read", user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    result = await run_in_threadpool(
+        PageIndexing.index_file_by_id,
+        form_data.file_id,
+        form_data.knowledge_id,
+        bool(form_data.force_reindex),
+        form_data.index_options,
+    )
+    return result
+
+
+@router.get("/pageindex/status/{file_id}")
+async def pageindex_status(file_id: str, user=Depends(get_verified_user)):
+    if not has_access_to_file(file_id, "read", user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    status_data = PageIndexing.get_indexing_status(file_id=file_id, user_id=user.id)
+    if not status_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    return status_data
+
+
+@router.post("/pageindex/search/candidates")
+async def pageindex_search_candidates(
+    form_data: PageIndexSearchCandidatesForm,
+    user=Depends(get_verified_user),
+):
+    knowledge_id = form_data.knowledge_id
+    if knowledge_id:
+        knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
+        if not knowledge:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=ERROR_MESSAGES.NOT_FOUND,
+            )
+        if not (
+            user.role == "admin"
+            or knowledge.user_id == user.id
+            or AccessGrants.has_access(
+                user_id=user.id,
+                resource_type="knowledge",
+                resource_id=knowledge_id,
+                permission="read",
+            )
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+            )
+
+    result = PageIndexing.search_candidate_documents(
+        query=form_data.query,
+        user_id=user.id,
+        knowledge_id=knowledge_id,
+        limit=form_data.limit or 10,
+    )
+
+    if form_data.file_ids:
+        allowed_file_ids = {
+            file_id
+            for file_id in form_data.file_ids
+            if has_access_to_file(file_id, "read", user)
+        }
+        result.items = [item for item in result.items if item.file_id in allowed_file_ids]
+
+    return result
+
+
+@router.post("/pageindex/query")
+async def pageindex_query(
+    form_data: PageIndexQueryForm,
+    user=Depends(get_verified_user),
+):
+    file_ids = list(form_data.file_ids or [])
+    if form_data.file_id:
+        file_ids.append(form_data.file_id)
+    file_ids = list(dict.fromkeys(file_ids))
+
+    if not file_ids and not form_data.knowledge_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either file_id/file_ids or knowledge_id is required.",
+        )
+
+    if form_data.knowledge_id and not file_ids:
+        result = await run_in_threadpool(
+            PageIndexChat.query_knowledge,
+            form_data.query,
+            form_data.knowledge_id,
+            user,
+            bool(form_data.auto_index),
+            bool(form_data.force_reindex),
+            int(form_data.candidate_limit or 5),
+            int(form_data.max_documents or 3),
+            form_data.qa_model,
+        )
+        return result
+
+    allowed_file_ids = [
+        file_id for file_id in file_ids if has_access_to_file(file_id, "read", user)
+    ]
+    if not allowed_file_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    if len(allowed_file_ids) == 1:
+        result = await run_in_threadpool(
+            PageIndexChat.query_single_file,
+            form_data.query,
+            allowed_file_ids[0],
+            user,
+            bool(form_data.auto_index),
+            bool(form_data.force_reindex),
+            form_data.qa_model,
+            form_data.knowledge_id,
+        )
+    else:
+        result = await run_in_threadpool(
+            PageIndexChat.query_multi_files,
+            form_data.query,
+            allowed_file_ids,
+            user,
+            bool(form_data.auto_index),
+            bool(form_data.force_reindex),
+            int(form_data.candidate_limit or 5),
+            int(form_data.max_documents or 3),
+            form_data.qa_model,
+        )
+
+    return result
+
+
+@router.get("/pageindex/tree/file/{file_id}")
+async def pageindex_tree_by_file(file_id: str, user=Depends(get_verified_user)):
+    if not has_access_to_file(file_id, "read", user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    tree_data = PageIndexes.load_tree_data_by_file_id(file_id=file_id, user_id=user.id)
+    if not tree_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    return tree_data
+
+
+@router.get("/pageindex/tree/document/{document_id}")
+async def pageindex_tree_by_document(document_id: str, user=Depends(get_verified_user)):
+    document = PageIndexes.get_document_by_id(document_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if document.user_id != user.id and not has_access_to_file(document.file_id, "read", user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    tree_data = PageIndexes.load_tree_data_by_document_id(document_id=document_id)
+    if not tree_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    return tree_data
 
 
 ####################################

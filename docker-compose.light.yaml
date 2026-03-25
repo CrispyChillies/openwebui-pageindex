@@ -1,34 +1,48 @@
 services:
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_HASH: local-dev
+    image: openwebui-pageindex:light
+    pull_policy: never
     container_name: open-webui-light
     ports:
       - "3000:8080"
-    volumes:
-      - open-webui:/app/backend/data
+
     environment:
-      - WEBUI_AUTH=True
-      - ENABLE_LOGIN_FORM=True
-      - ENABLE_SIGNUP=True
-      - ENABLE_INITIAL_ADMIN_SIGNUP=True
-      - WEBUI_ADMIN_EMAIL=${WEBUI_ADMIN_EMAIL:-}
-      - WEBUI_ADMIN_PASSWORD=${WEBUI_ADMIN_PASSWORD:-}
-      - WEBUI_ADMIN_NAME=${WEBUI_ADMIN_NAME:-Admin}
-      - ENABLE_OLLAMA_API=False
-      - ENABLE_OPENAI_API=True
-      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - ENABLE_WEB_SEARCH=False
-      - ENABLE_IMAGE_GENERATION=False
-      - ENABLE_RAG_HYBRID_SEARCH=False
-      - ENABLE_RAG_LOCAL_WEB_FETCH=False
-      - RAG_EMBEDDING_ENGINE=openai
-      - RAG_EMBEDDING_MODEL=text-embedding-3-small
-      - RAG_EMBEDDING_MODEL_AUTO_UPDATE=False
-      - UVICORN_WORKERS=1
-    cpus: "2.0"
-    mem_limit: 3g
+      ENV: dev
+      OPENWEBUI_APP_MODE: ${OPENWEBUI_APP_MODE:-pageindex}
+
+      WEBUI_AUTH: "True"
+      ENABLE_LOGIN_FORM: "True"
+      ENABLE_SIGNUP: "True"
+      ENABLE_INITIAL_ADMIN_SIGNUP: "True"
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-pageindex.admin@example.com}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-Phase3Admin!234}
+      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-PageIndex Admin}
+
+      ENABLE_OLLAMA_API: "False"
+      ENABLE_OPENAI_API: "True"
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+      ENABLE_WEB_SEARCH: "True"
+      ENABLE_IMAGE_GENERATION: "False"
+      ENABLE_RAG_HYBRID_SEARCH: "False"
+      ENABLE_RAG_LOCAL_WEB_FETCH: "False"
+
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_EMBEDDING_MODEL: text-embedding-3-small
+      RAG_EMBEDDING_MODEL_AUTO_UPDATE: "False"
+
+      UVICORN_WORKERS: "1"
+
+    volumes:
+      - open-webui-data:/app/backend/data
+
     restart: unless-stopped
 
 volumes:
-  open-webui: {}
+  open-webui-data: {}

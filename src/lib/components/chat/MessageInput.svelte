@@ -100,6 +100,7 @@
 	import InputModal from '../common/InputModal.svelte';
 	import Expand from '../icons/Expand.svelte';
 	import QueuedMessageItem from './MessageInput/QueuedMessageItem.svelte';
+	import { is_pageindex_mode } from '$lib/app-mode';
 
 	const i18n = getContext('i18n');
 
@@ -488,9 +489,13 @@
 	$: toggleFilters = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels)
 		.map((id) => ($models.find((model) => model.id === id) || {})?.filters ?? [])
 		.reduce((acc, filters) => acc.filter((f1) => filters.some((f2) => f2.id === f1.id)));
+	$: if ($is_pageindex_mode) {
+		toggleFilters = [];
+	}
 
 	let showToolsButton = false;
-	$: showToolsButton = ($tools ?? []).length > 0 || ($toolServers ?? []).length > 0;
+	$: showToolsButton =
+		!$is_pageindex_mode && (($tools ?? []).length > 0 || ($toolServers ?? []).length > 0);
 
 	let showWebSearchButton = false;
 	$: showWebSearchButton =
@@ -501,6 +506,7 @@
 
 	let showImageGenerationButton = false;
 	$: showImageGenerationButton =
+		!$is_pageindex_mode &&
 		(atSelectedModel?.id ? [atSelectedModel.id] : selectedModels).length ===
 			imageGenerationCapableModels.length &&
 		$config?.features?.enable_image_generation &&
@@ -508,6 +514,7 @@
 
 	let showCodeInterpreterButton = false;
 	$: showCodeInterpreterButton =
+		!$is_pageindex_mode &&
 		(atSelectedModel?.id ? [atSelectedModel.id] : selectedModels).length ===
 			codeInterpreterCapableModels.length &&
 		$config?.features?.enable_code_interpreter &&
@@ -1576,7 +1583,7 @@
 										</div>
 									</InputMenu>
 
-									{#if showWebSearchButton || showImageGenerationButton || showCodeInterpreterButton || showToolsButton || (toggleFilters && toggleFilters.length > 0)}
+									{#if !$is_pageindex_mode && (showWebSearchButton || showImageGenerationButton || showCodeInterpreterButton || showToolsButton || (toggleFilters && toggleFilters.length > 0))}
 										<div
 											class="flex self-center w-[1px] h-4 mx-1 bg-gray-200/50 dark:bg-gray-800/50"
 										/>
@@ -1614,6 +1621,25 @@
 												<Component className="size-4.5" strokeWidth="1.5" />
 											</div>
 										</IntegrationsMenu>
+									{:else if $is_pageindex_mode && showWebSearchButton}
+										<div
+											class="flex self-center w-[1px] h-4 mx-1 bg-gray-200/50 dark:bg-gray-800/50"
+										/>
+
+										<div class="ml-1 flex gap-1.5">
+											<Tooltip content={$i18n.t('Web Search')} placement="top">
+												<button
+													on:click|preventDefault={() => (webSearchEnabled = !webSearchEnabled)}
+													type="button"
+													class="group p-[7px] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {webSearchEnabled ||
+													($settings?.webSearch ?? false) === 'always'
+														? ' text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-600/10 border border-sky-200/40 dark:border-sky-500/20'
+														: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '}"
+												>
+													<GlobeAlt className="size-4" strokeWidth="1.75" />
+												</button>
+											</Tooltip>
+										</div>
 									{/if}
 
 									{#if selectedModelIds.length === 1 && $models.find((m) => m.id === selectedModelIds[0])?.has_user_valves}
@@ -1636,7 +1662,7 @@
 									{/if}
 
 									<div class="ml-1 flex gap-1.5">
-										{#if (selectedToolIds ?? []).filter((id) => !id.startsWith('direct_server:terminal_')).length > 0}
+										{#if !$is_pageindex_mode && (selectedToolIds ?? []).filter((id) => !id.startsWith('direct_server:terminal_')).length > 0}
 											<Tooltip
 												content={$i18n.t('{{COUNT}} Available Tools', {
 													COUNT: (selectedToolIds ?? []).filter(
@@ -1663,42 +1689,46 @@
 											</Tooltip>
 										{/if}
 
-										{#each selectedFilterIds as filterId}
-											{@const filter = toggleFilters.find((f) => f.id === filterId)}
-											{#if filter}
-												<Tooltip content={filter?.name} placement="top">
-													<button
-														on:click|preventDefault={() => {
-															selectedFilterIds = selectedFilterIds.filter((id) => id !== filterId);
-														}}
-														type="button"
-														class="group p-[7px] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {selectedFilterIds.includes(
-															filterId
-														)
-															? 'text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-600/10 border border-sky-200/40 dark:border-sky-500/20'
-															: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '} capitalize"
-													>
-														{#if filter?.icon}
-															<div class="size-4 items-center flex justify-center">
-																<img
-																	src={filter.icon}
-																	class="size-3.5 {filter.icon.includes('data:image/svg')
-																		? 'dark:invert-[80%]'
-																		: ''}"
-																	style="fill: currentColor;"
-																	alt={filter.name}
-																/>
+										{#if !$is_pageindex_mode}
+											{#each selectedFilterIds as filterId}
+												{@const filter = toggleFilters.find((f) => f.id === filterId)}
+												{#if filter}
+													<Tooltip content={filter?.name} placement="top">
+														<button
+															on:click|preventDefault={() => {
+																selectedFilterIds = selectedFilterIds.filter(
+																	(id) => id !== filterId
+																);
+															}}
+															type="button"
+															class="group p-[7px] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {selectedFilterIds.includes(
+																filterId
+															)
+																? 'text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-600/10 border border-sky-200/40 dark:border-sky-500/20'
+																: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '} capitalize"
+														>
+															{#if filter?.icon}
+																<div class="size-4 items-center flex justify-center">
+																	<img
+																		src={filter.icon}
+																		class="size-3.5 {filter.icon.includes('data:image/svg')
+																			? 'dark:invert-[80%]'
+																			: ''}"
+																		style="fill: currentColor;"
+																		alt={filter.name}
+																	/>
+																</div>
+															{:else}
+																<Sparkles className="size-4" strokeWidth="1.75" />
+															{/if}
+															<div class="hidden group-hover:block">
+																<XMark className="size-4" strokeWidth="1.75" />
 															</div>
-														{:else}
-															<Sparkles className="size-4" strokeWidth="1.75" />
-														{/if}
-														<div class="hidden group-hover:block">
-															<XMark className="size-4" strokeWidth="1.75" />
-														</div>
-													</button>
-												</Tooltip>
-											{/if}
-										{/each}
+														</button>
+													</Tooltip>
+												{/if}
+											{/each}
+										{/if}
 
 										{#if webSearchEnabled}
 											<Tooltip content={$i18n.t('Web Search')} placement="top">
@@ -1718,7 +1748,7 @@
 											</Tooltip>
 										{/if}
 
-										{#if imageGenerationEnabled}
+										{#if !$is_pageindex_mode && imageGenerationEnabled}
 											<Tooltip content={$i18n.t('Image')} placement="top">
 												<button
 													on:click|preventDefault={() =>
@@ -1736,7 +1766,7 @@
 											</Tooltip>
 										{/if}
 
-										{#if codeInterpreterEnabled}
+										{#if !$is_pageindex_mode && codeInterpreterEnabled}
 											<Tooltip content={$i18n.t('Code Interpreter')} placement="top">
 												<button
 													aria-label={codeInterpreterEnabled

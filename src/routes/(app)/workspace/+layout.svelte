@@ -14,12 +14,18 @@
 	import { goto } from '$app/navigation';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Sidebar from '$lib/components/icons/Sidebar.svelte';
+	import { is_default_mode } from '$lib/app-mode';
 
 	const i18n = getContext('i18n');
 
 	let loaded = false;
 
 	onMount(async () => {
+		if (!$is_default_mode) {
+			goto('/');
+			return;
+		}
+
 		if ($user?.role !== 'admin') {
 			if ($page.url.pathname.includes('/models') && !$user?.permissions?.workspace?.models) {
 				goto('/');

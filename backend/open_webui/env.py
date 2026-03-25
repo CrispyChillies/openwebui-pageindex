@@ -71,6 +71,14 @@ try:
 except Exception:
     pass
 
+OPENWEBUI_APP_MODE = os.getenv("OPENWEBUI_APP_MODE", "default").strip().lower()
+
+if OPENWEBUI_APP_MODE not in {"default", "pageindex"}:
+    OPENWEBUI_APP_MODE = "default"
+
+IS_DEFAULT_MODE = OPENWEBUI_APP_MODE == "default"
+IS_PAGEINDEX_MODE = OPENWEBUI_APP_MODE == "pageindex"
+
 ####################################
 # LOGGING
 ####################################

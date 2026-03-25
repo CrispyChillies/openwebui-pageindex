@@ -39,6 +39,18 @@ from open_webui.internal.db import Base, get_db
 from open_webui.utils.redis import get_redis_connection
 
 
+VALID_APP_MODES = ("default", "pageindex")
+OPENWEBUI_APP_MODE = os.environ.get("OPENWEBUI_APP_MODE", "default").strip().lower()
+if OPENWEBUI_APP_MODE not in VALID_APP_MODES:
+    log.warning(
+        f"Invalid OPENWEBUI_APP_MODE='{OPENWEBUI_APP_MODE}', falling back to 'default'"
+    )
+    OPENWEBUI_APP_MODE = "default"
+
+IS_DEFAULT_MODE = OPENWEBUI_APP_MODE == "default"
+IS_PAGEINDEX_MODE = OPENWEBUI_APP_MODE == "pageindex"
+
+
 class EndpointFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         return record.getMessage().find("/health") == -1

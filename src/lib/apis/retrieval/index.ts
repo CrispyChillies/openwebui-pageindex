@@ -442,6 +442,73 @@ export const queryDoc = async (
 	return res;
 };
 
+type PageIndexIndexPayload = {
+	file_id: string;
+	knowledge_id?: string | null;
+	force_reindex?: boolean;
+	index_options?: Record<string, any> | null;
+};
+
+export const pageIndexIndexFile = async (token: string, payload: PageIndexIndexPayload) => {
+	let error = null;
+
+	const res = await fetch(`${RETRIEVAL_API_BASE_URL}/pageindex/index`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(payload)
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err.message ?? 'Failed to trigger PageIndex indexing';
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getPageIndexStatus = async (token: string, fileId: string) => {
+	let error = null;
+
+	const res = await fetch(`${RETRIEVAL_API_BASE_URL}/pageindex/status/${fileId}`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (res.status === 404) {
+				return null;
+			}
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err.message ?? 'Failed to load PageIndex status';
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
 export const queryCollection = async (
 	token: string,
 	collection_names: string,

@@ -493,6 +493,9 @@ from open_webui.env import (
     SCIM_TOKEN,
     ENABLE_COMPRESSION_MIDDLEWARE,
     ENABLE_WEBSOCKET_SUPPORT,
+    OPENWEBUI_APP_MODE,
+    IS_DEFAULT_MODE,
+    IS_PAGEINDEX_MODE,
     BYPASS_MODEL_ACCESS_CONTROL,
     RESET_CONFIG_ON_START,
     ENABLE_VERSION_UPDATE_CHECK,
@@ -734,6 +737,7 @@ app.state.redis = None
 
 app.state.WEBUI_NAME = WEBUI_NAME
 app.state.LICENSE_METADATA = None
+app.state.APP_MODE = OPENWEBUI_APP_MODE
 
 
 ########################################
@@ -2123,6 +2127,9 @@ async def get_app_config(request: Request):
     return {
         **({"onboarding": True} if onboarding else {}),
         "status": True,
+        "app_mode": app.state.APP_MODE,
+        "is_default_mode": IS_DEFAULT_MODE,
+        "is_pageindex_mode": IS_PAGEINDEX_MODE,
         "name": app.state.WEBUI_NAME,
         "version": VERSION,
         "default_locale": str(DEFAULT_LOCALE),

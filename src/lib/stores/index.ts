@@ -253,6 +253,9 @@ type Document = {
 };
 
 type Config = {
+	app_mode?: 'default' | 'pageindex' | string;
+	is_default_mode?: boolean;
+	is_pageindex_mode?: boolean;
 	license_metadata: any;
 	status: boolean;
 	name: string;

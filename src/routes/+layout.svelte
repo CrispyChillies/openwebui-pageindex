@@ -101,6 +101,24 @@
 	let heartbeatInterval = null;
 
 	const BREAKPOINT = 768;
+	const BACKEND_CONFIG_TIMEOUT_MS = 8000;
+
+	const withTimeout = async (promise, timeoutMs, timeoutMessage) => {
+		let timeoutId;
+
+		try {
+			return await Promise.race([
+				promise,
+				new Promise((_, reject) => {
+					timeoutId = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+				})
+			]);
+		} finally {
+			if (timeoutId) {
+				clearTimeout(timeoutId);
+			}
+		}
+	};
 
 	const setupSocket = async (enableWebsocket) => {
 		const _socket = io(`${WEBUI_BASE_URL}` || undefined, {
@@ -782,7 +800,11 @@
 
 		let backendConfig = null;
 		try {
-			backendConfig = await getBackendConfig();
+			backendConfig = await withTimeout(
+				getBackendConfig(),
+				BACKEND_CONFIG_TIMEOUT_MS,
+				`Timed out loading backend config from ${WEBUI_BASE_URL || 'the backend'}`
+			);
 			console.log('Backend config:', backendConfig);
 		} catch (error) {
 			console.error('Error loading backend config:', error);

@@ -98,12 +98,14 @@
 	import ChatControls from './ChatControls.svelte';
 	import EventConfirmDialog from '../common/ConfirmDialog.svelte';
 	import Placeholder from './Placeholder.svelte';
+	import PageIndexMode from './PageIndexMode.svelte';
 	import FilesOverlay from './MessageInput/FilesOverlay.svelte';
 	import NotificationToast from '../NotificationToast.svelte';
 	import Spinner from '../common/Spinner.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
 	import Sidebar from '../icons/Sidebar.svelte';
 	import Image from '../common/Image.svelte';
+	import { is_pageindex_mode } from '$lib/app-mode';
 
 	export let chatIdProp = '';
 
@@ -1571,7 +1573,18 @@
 	};
 
 	const chatCompletionEventHandler = async (data, message, chatId) => {
-		const { id, done, choices, content, output, sources, selected_model_id, error, usage } = data;
+		const {
+			id,
+			done,
+			choices,
+			content,
+			output,
+			sources,
+			pageindex,
+			selected_model_id,
+			error,
+			usage
+		} = data;
 
 		// Store raw OR-aligned output items from backend
 		if (output) {
@@ -1584,6 +1597,10 @@
 
 		if (sources && !message?.sources) {
 			message.sources = sources;
+		}
+
+		if (pageindex) {
+			message.pageindex = pageindex;
 		}
 
 		if (choices) {
@@ -2748,7 +2765,7 @@
 					/>
 
 					<div id="chat-pane" class="flex flex-col flex-auto z-10 w-full @container overflow-auto">
-						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
+						{#if (!$is_pageindex_mode && $settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
 							<div
 								class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0 max-w-full z-10 scrollbar-hidden"
 								id="messages-container"
@@ -2857,66 +2874,103 @@
 								</div>
 							</div>
 						{:else}
-							<div class="flex items-center h-full">
-								<Placeholder
-									{history}
-									{selectedModels}
-									bind:messageInput
-									bind:files
-									bind:prompt
-									bind:autoScroll
-									bind:selectedToolIds
-									bind:selectedFilterIds
-									bind:imageGenerationEnabled
-									bind:codeInterpreterEnabled
-									bind:webSearchEnabled
-									bind:atSelectedModel
-									bind:showCommands
-									bind:dragged
-									toolServers={$toolServers}
-									{stopResponse}
-									{createMessagePair}
-									{onSelect}
-									{onUpload}
-									onChange={(data) => {
-										if (!$temporaryChatEnabled) {
-											saveDraft(data);
-										}
-									}}
-									on:submit={async (e) => {
-										clearDraft();
-										if (e.detail || files.length > 0) {
-											await tick();
-											submitPrompt(e.detail.replaceAll('\n\n', '\n'));
-										}
-									}}
-								/>
+							<div class="flex items-center h-full w-full">
+								{#if $is_pageindex_mode}
+									<PageIndexMode
+										{history}
+										{selectedModels}
+										bind:messageInput
+										bind:files
+										bind:prompt
+										bind:autoScroll
+										bind:selectedToolIds
+										bind:selectedFilterIds
+										bind:imageGenerationEnabled
+										bind:codeInterpreterEnabled
+										bind:webSearchEnabled
+										bind:atSelectedModel
+										bind:showCommands
+										bind:dragged
+										toolServers={$toolServers}
+										{stopResponse}
+										{createMessagePair}
+										{onUpload}
+										onChange={(data) => {
+											if (!$temporaryChatEnabled) {
+												saveDraft(data);
+											}
+										}}
+										on:submit={async (e) => {
+											clearDraft();
+											if (e.detail || files.length > 0) {
+												await tick();
+												submitPrompt(e.detail.replaceAll('\n\n', '\n'));
+											}
+										}}
+									/>
+								{:else}
+									<Placeholder
+										{history}
+										{selectedModels}
+										bind:messageInput
+										bind:files
+										bind:prompt
+										bind:autoScroll
+										bind:selectedToolIds
+										bind:selectedFilterIds
+										bind:imageGenerationEnabled
+										bind:codeInterpreterEnabled
+										bind:webSearchEnabled
+										bind:atSelectedModel
+										bind:showCommands
+										bind:dragged
+										toolServers={$toolServers}
+										{stopResponse}
+										{createMessagePair}
+										{onSelect}
+										{onUpload}
+										onChange={(data) => {
+											if (!$temporaryChatEnabled) {
+												saveDraft(data);
+											}
+										}}
+										on:submit={async (e) => {
+											clearDraft();
+											if (e.detail || files.length > 0) {
+												await tick();
+												submitPrompt(e.detail.replaceAll('\n\n', '\n'));
+											}
+										}}
+									/>
+								{/if}
 							</div>
 						{/if}
 					</div>
 				</Pane>
 
-				<ChatControls
-					bind:this={controlPaneComponent}
-					bind:history
-					bind:chatFiles
-					bind:params
-					bind:files
-					bind:pane={controlPane}
-					chatId={$chatId}
-					modelId={selectedModelIds?.at(0) ?? null}
-					models={selectedModelIds.reduce((a, e, i, arr) => {
-						const model = $models.find((m) => m.id === e);
-						if (model) {
-							return [...a, model];
-						}
-						return a;
-					}, [])}
-					{submitPrompt}
-					{stopResponse}
-					{showMessage}
-					{eventTarget}
-				/>
+				{#if !$is_pageindex_mode}
+					<ChatControls
+						bind:this={controlPaneComponent}
+						bind:history
+						bind:chatFiles
+						bind:params
+						bind:files
+						bind:pane={controlPane}
+						chatId={$chatId}
+						modelId={selectedModelIds?.at(0) ?? null}
+						models={selectedModelIds.reduce((a, e, i, arr) => {
+							const model = $models.find((m) => m.id === e);
+							if (model) {
+								return [...a, model];
+							}
+							return a;
+						}, [])}
+						{submitPrompt}
+						{stopResponse}
+						{showMessage}
+						{eventTarget}
+					/>
+				{/if}
 			</PaneGroup>
 		</div>
 	{:else if loading}
@@ -2931,6 +2985,9 @@
 <style>
 	::-webkit-scrollbar {
 		height: 0.5rem;
-		width: 0.5rem;
+	}
+
+	::-webkit-scrollbar-thumb {
+		border-radius: 9999px;
 	}
 </style>
