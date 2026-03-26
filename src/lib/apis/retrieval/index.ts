@@ -509,6 +509,34 @@ export const getPageIndexStatus = async (token: string, fileId: string) => {
 	return res;
 };
 
+export const deletePageIndexUploadedDocument = async (token: string, fileId: string) => {
+	let error = null;
+
+	const res = await fetch(`${RETRIEVAL_API_BASE_URL}/pageindex/documents/${fileId}`, {
+		method: 'DELETE',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err.message ?? 'Failed to delete uploaded document';
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
 export const queryCollection = async (
 	token: string,
 	collection_names: string,

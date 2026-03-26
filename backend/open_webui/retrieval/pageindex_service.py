@@ -7,6 +7,7 @@ from typing import Optional
 
 from open_webui.models.files import Files
 from open_webui.models.pageindex import (
+    PageIndexCandidateSearchResponse,
     PageIndexDocumentUpsertForm,
     PageIndexIndexResult,
     PageIndexStatusResponse,
@@ -46,6 +47,8 @@ class PageIndexService:
             options.setdefault("if_add_node_id", "yes")
             options.setdefault("if_add_node_summary", "yes")
             options.setdefault("if_add_doc_description", "yes")
+            # PDF: raw text extracted separately via get_page_tokens(); no need
+            # to store it in the tree JSON (keeps tree compact).
             options.setdefault("if_add_node_text", "no")
             options.setdefault("toc_check_page_num", 20)
             options.setdefault("max_page_num_each_node", 10)
@@ -54,12 +57,51 @@ class PageIndexService:
             options.setdefault("if_add_node_id", "yes")
             options.setdefault("if_add_node_summary", "yes")
             options.setdefault("if_add_doc_description", "yes")
-            options.setdefault("if_add_node_text", "no")
+            # Markdown: preserve raw node text so the semantic indexer can
+            # chunk it directly from node.text without re-reading the file.
+            options.setdefault("if_add_node_text", "yes")
             options.setdefault("if_thinning", False)
             options.setdefault("min_token_threshold", 5000)
             options.setdefault("summary_token_threshold", 200)
 
         return options
+
+
+    @staticmethod
+    def _extract_page_list(
+        local_file_path: str,
+        source_type: str,
+    ) -> Optional[list]:
+        """
+        Extract the raw page list from a PDF using the pageindex library's
+        ``get_page_tokens()`` (PyPDF2/PyMuPDF) so raw page text is available
+        for semantic chunking.
+
+        Returns ``None`` when:
+        - source_type is not PDF.
+        - The pageindex library is not importable.
+        - Extraction fails for any reason (logged, not raised).
+
+        When successful, returns a list of ``(page_text, token_count)`` tuples.
+        """
+        if source_type != "pdf":
+            return None
+        try:
+            PageIndexService._ensure_pageindex_import_path()
+            from pageindex.utils import get_page_tokens  # type: ignore[reportMissingImports]
+
+            page_list = get_page_tokens(local_file_path)
+            log.info(
+                f"pageindex_service: extracted {len(page_list)} raw pages "
+                f"from PDF for semantic chunking"
+            )
+            return page_list
+        except Exception as e:
+            log.warning(
+                f"pageindex_service: failed to extract raw page list from PDF ({e}); "
+                "semantic chunking will fall back to summary-only"
+            )
+            return None
 
     @staticmethod
     def _run_pdf_indexing(local_file_path: str, index_options: dict) -> dict:
@@ -83,6 +125,7 @@ class PageIndexService:
             raise RuntimeError("PageIndex PDF indexing returned invalid tree data")
         return tree_data
 
+
     @staticmethod
     def _run_markdown_indexing(local_file_path: str, index_options: dict) -> dict:
         PageIndexService._ensure_pageindex_import_path()
@@ -102,6 +145,37 @@ class PageIndexService:
             )
 
         return asyncio.run(run_md())
+
+    @staticmethod
+    async def _run_semantic_indexing(
+        document_id: str,
+        file_id: str,
+        knowledge_id: Optional[str],
+        user_id: str,
+        tree_data: dict,
+        source_type: Optional[str],
+        page_list: Optional[list] = None,
+    ) -> int:
+        """
+        Embed and upsert semantic chunks for this document.
+
+        *page_list* — for PDF files, the raw page-text list from
+        ``get_page_tokens()``.  When provided, raw page text aligned to
+        tree-node page ranges is used for chunking (higher-quality embeddings).
+
+        Returns number of chunks indexed.  Raises on failure.
+        """
+        from open_webui.retrieval import pageindex_semantic  # noqa: PLC0415
+
+        return await pageindex_semantic.index_document_chunks(
+            document_id=document_id,
+            file_id=file_id,
+            knowledge_id=knowledge_id,
+            user_id=user_id,
+            tree_data=tree_data,
+            source_type=source_type,
+            page_list=page_list,
+        )
 
     def index_file_by_id(
         self,
@@ -151,6 +225,7 @@ class PageIndexService:
                     file_id=file.id,
                 )
 
+            # ── Step 1: Mark as processing ───────────────────────────────────
             transition_form = PageIndexDocumentUpsertForm(
                 file_id=file.id,
                 knowledge_id=resolved_knowledge_id,
@@ -169,6 +244,7 @@ class PageIndexService:
             if not processing_doc:
                 raise RuntimeError("Failed to transition PageIndex status to processing")
 
+            # ── Step 2: Build PageIndex tree ──────────────────────────────────
             effective_options = self._build_index_options(index_options, source_type=source_type)
             if source_type == "pdf":
                 tree_data = self._run_pdf_indexing(local_file_path, effective_options)
@@ -181,6 +257,16 @@ class PageIndexService:
             doc_title = tree_data.get("doc_name") or file.filename
             doc_description = tree_data.get("doc_description")
 
+            # ── Step 2.5: Extract raw page list for semantic chunking ─────────
+            # For PDFs, raw page text per node gives much richer embeddings
+            # than summaries alone.  This is a best-effort step: failure is
+            # logged and the semantic indexer falls back to summary-only.
+            page_list = self._extract_page_list(local_file_path, source_type)
+
+            # ── Step 3: Persist tree and nodes ────────────────────────────────
+            # We persist the tree first so the document record exists in the DB
+            # before attempting vector upsert.  If vector upsert fails the
+            # document is marked failed and the tree is preserved for debugging.
             save_form = PageIndexDocumentUpsertForm(
                 file_id=file.id,
                 knowledge_id=resolved_knowledge_id,
@@ -189,21 +275,57 @@ class PageIndexService:
                 doc_description=doc_description,
                 source_type=source_type,
                 source_hash=source_hash,
-                status="ready",
+                status="processing",  # still processing; semantic step not done
                 tree_json=tree_data,
                 generated_at=now_epoch(),
                 index_options=effective_options,
                 error_message=None,
             )
-            ready_doc = PageIndexes.save_document_with_flattened_nodes(form_data=save_form)
-            if not ready_doc:
+            saved_doc = PageIndexes.save_document_with_flattened_nodes(form_data=save_form)
+            if not saved_doc:
                 raise RuntimeError("Failed to persist PageIndex tree and nodes")
+
+            document_id = saved_doc.id
+
+            # ── Step 4: Semantic chunk embedding and vector upsert ────────────
+            try:
+                chunk_count = asyncio.run(
+                    self._run_semantic_indexing(
+                        document_id=document_id,
+                        file_id=file.id,
+                        knowledge_id=resolved_knowledge_id,
+                        user_id=user_id,
+                        tree_data=tree_data,
+                        source_type=source_type,
+                        page_list=page_list,
+                    )
+                )
+                log.info(
+                    f"PageIndex semantic indexing complete: "
+                    f"document_id={document_id} chunks={chunk_count}"
+                )
+            except Exception as sem_err:
+                # Semantic failure is logged and propagated; document is marked failed.
+                log.exception(
+                    f"PageIndex semantic indexing failed for document_id={document_id}: {sem_err}"
+                )
+                raise RuntimeError(
+                    f"Semantic chunk indexing failed: {sem_err}"
+                ) from sem_err
+
+            # ── Step 5: Mark as ready ─────────────────────────────────────────
+            PageIndexes.update_document_status(
+                file_id=file.id,
+                user_id=user_id,
+                status="ready",
+                knowledge_id=resolved_knowledge_id,
+            )
 
             return PageIndexIndexResult(
                 indexed=True,
                 status="ready",
                 message="PageIndex indexing completed",
-                document_id=ready_doc.id,
+                document_id=document_id,
                 file_id=file.id,
             )
         except Exception as e:
@@ -226,19 +348,117 @@ class PageIndexService:
     def get_indexing_status(self, file_id: str, user_id: Optional[str] = None) -> Optional[PageIndexStatusResponse]:
         return PageIndexes.get_indexing_status_by_file_id(file_id=file_id, user_id=user_id)
 
-    def search_candidate_documents(
+    async def search_candidate_documents_semantic(
         self,
         query: str,
         user_id: Optional[str] = None,
         knowledge_id: Optional[str] = None,
+        file_ids: Optional[list[str]] = None,
         limit: int = 10,
-    ):
+    ) -> PageIndexCandidateSearchResponse:
+        """
+        Search candidate documents using vector similarity over semantic chunks.
+
+        Delegates to :mod:`open_webui.retrieval.pageindex_semantic`.
+        Falls back to SQL token search if the semantic search fails or returns
+        no results (e.g., embedding function not yet registered, collection empty).
+        """
+        from open_webui.retrieval import pageindex_semantic  # noqa: PLC0415
+
+        try:
+            result = await pageindex_semantic.search_candidate_documents(
+                query=query,
+                user_id=user_id,
+                knowledge_id=knowledge_id,
+                file_ids=file_ids,
+                limit=limit,
+            )
+            if result.items:
+                log.debug(
+                    f"pageindex_service: semantic search returned {len(result.items)} candidates"
+                )
+                return result
+            log.info(
+                "pageindex_service: semantic search returned no candidates; "
+                "falling back to SQL token search"
+            )
+        except Exception as e:
+            log.warning(
+                f"pageindex_service: semantic search error ({e}); "
+                "falling back to SQL token search"
+            )
+
+        # Fallback: SQL token match search
         return PageIndexes.search_candidate_documents(
             query=query,
             user_id=user_id,
             knowledge_id=knowledge_id,
             limit=limit,
         )
+
+    def search_candidate_documents(
+        self,
+        query: str,
+        user_id: Optional[str] = None,
+        knowledge_id: Optional[str] = None,
+        limit: int = 10,
+    ) -> PageIndexCandidateSearchResponse:
+        """
+        Synchronous wrapper that calls the async semantic search path.
+
+        When called from a thread (e.g., via ``run_in_threadpool``), we need
+        to run the async coroutine manually.  Uses ``asyncio.run()`` when there
+        is no running event loop, otherwise schedules via the loop.
+        """
+        file_ids: Optional[list[str]] = None  # no file-id scoping at this level
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures  # noqa: PLC0415
+
+                future = asyncio.ensure_future(
+                    self.search_candidate_documents_semantic(
+                        query=query,
+                        user_id=user_id,
+                        knowledge_id=knowledge_id,
+                        file_ids=file_ids,
+                        limit=limit,
+                    )
+                )
+                # We are inside a thread already; use a separate event loop.
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    result = pool.submit(
+                        asyncio.run,
+                        self.search_candidate_documents_semantic(
+                            query=query,
+                            user_id=user_id,
+                            knowledge_id=knowledge_id,
+                            file_ids=file_ids,
+                            limit=limit,
+                        ),
+                    ).result()
+                return result
+            else:
+                return loop.run_until_complete(
+                    self.search_candidate_documents_semantic(
+                        query=query,
+                        user_id=user_id,
+                        knowledge_id=knowledge_id,
+                        file_ids=file_ids,
+                        limit=limit,
+                    )
+                )
+        except RuntimeError:
+            # No event loop available; create one.
+            return asyncio.run(
+                self.search_candidate_documents_semantic(
+                    query=query,
+                    user_id=user_id,
+                    knowledge_id=knowledge_id,
+                    file_ids=file_ids,
+                    limit=limit,
+                )
+            )
 
     def load_tree_data_by_document_id(self, document_id: str) -> Optional[dict]:
         return PageIndexes.load_tree_data_by_document_id(document_id=document_id)

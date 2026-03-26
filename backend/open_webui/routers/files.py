@@ -168,11 +168,29 @@ def process_uploaded_file(
 
 def process_uploaded_file_pageindex(
     file_item,
+    request=None,
     knowledge_id: Optional[str] = None,
     db: Optional[Session] = None,
 ):
     def _process_handler(db_session):
         try:
+            # Inject the embedding function so pageindex_semantic can embed chunks.
+            # This mirrors what the retrieval router endpoints do before indexing.
+            if request is not None:
+                from open_webui.retrieval import pageindex_semantic  # noqa: PLC0415
+
+                embedding_fn = getattr(request.app.state, "EMBEDDING_FUNCTION", None)
+                if embedding_fn is not None:
+                    pageindex_semantic.set_embedding_function(
+                        lambda texts, prefix=None: embedding_fn(texts, prefix=prefix)
+                    )
+                else:
+                    log.warning(
+                        "process_uploaded_file_pageindex: "
+                        "EMBEDDING_FUNCTION not available on app state; "
+                        "semantic indexing will fail"
+                    )
+
             Files.update_file_data_by_id(
                 file_item.id,
                 {
@@ -376,12 +394,14 @@ def upload_file_handler(
                 background_tasks.add_task(
                     process_uploaded_file_pageindex,
                     file_item,
+                    request,
                     knowledge_id,
                 )
                 return {"status": True, **file_item.model_dump()}
             else:
                 process_uploaded_file_pageindex(
                     file_item,
+                    request,
                     knowledge_id,
                     db,
                 )

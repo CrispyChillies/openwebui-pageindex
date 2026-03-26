@@ -159,6 +159,9 @@ class PageIndexCandidateDocument(BaseModel):
     doc_description: Optional[str] = None
     score: float
     matched_nodes: int = 0
+    # Additive semantic fields — None when using SQL token search fallback.
+    semantic_score: Optional[float] = None
+    matched_chunks: Optional[int] = None
 
 
 class PageIndexCandidateSearchResponse(BaseModel):

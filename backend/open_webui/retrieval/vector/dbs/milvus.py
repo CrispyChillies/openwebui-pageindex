@@ -280,7 +280,7 @@ class MilvusClient(VectorDBBase):
                     "Cannot create Milvus collection without items to determine vector dimension."
                 )
             self._create_collection(
-                collection_name=collection_name, dimension=len(items[0]["vector"])
+                collection_name=collection_name, dimension=len(items[0].vector)
             )
 
         log.info(
@@ -290,10 +290,10 @@ class MilvusClient(VectorDBBase):
             collection_name=f"{self.collection_prefix}_{collection_name}",
             data=[
                 {
-                    "id": item["id"],
-                    "vector": item["vector"],
-                    "data": {"text": item["text"]},
-                    "metadata": process_metadata(item["metadata"]),
+                    "id": item.id,
+                    "vector": item.vector,
+                    "data": {"text": item.text},
+                    "metadata": process_metadata(item.metadata),
                 }
                 for item in items
             ],
@@ -316,7 +316,7 @@ class MilvusClient(VectorDBBase):
                     "Cannot create Milvus collection for upsert without items to determine vector dimension."
                 )
             self._create_collection(
-                collection_name=collection_name, dimension=len(items[0]["vector"])
+                collection_name=collection_name, dimension=len(items[0].vector)
             )
 
         log.info(
@@ -326,10 +326,10 @@ class MilvusClient(VectorDBBase):
             collection_name=f"{self.collection_prefix}_{collection_name}",
             data=[
                 {
-                    "id": item["id"],
-                    "vector": item["vector"],
-                    "data": {"text": item["text"]},
-                    "metadata": process_metadata(item["metadata"]),
+                    "id": item.id,
+                    "vector": item.vector,
+                    "data": {"text": item.text},
+                    "metadata": process_metadata(item.metadata),
                 }
                 for item in items
             ],

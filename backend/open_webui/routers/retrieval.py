@@ -2700,6 +2700,7 @@ async def query_collection_handler(
 
 @router.post("/pageindex/index")
 async def pageindex_index_file(
+    request: Request,
     form_data: PageIndexIndexForm,
     user=Depends(get_verified_user),
 ):
@@ -2707,6 +2708,16 @@ async def pageindex_index_file(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    # Inject embedding function so the semantic indexer can embed chunks.
+    if request.app.state.EMBEDDING_FUNCTION is not None:
+        from open_webui.retrieval import pageindex_semantic  # noqa: PLC0415
+
+        pageindex_semantic.set_embedding_function(
+            lambda query, prefix=None: request.app.state.EMBEDDING_FUNCTION(
+                query, prefix=prefix
+            )
         )
 
     result = await run_in_threadpool(
@@ -2738,6 +2749,7 @@ async def pageindex_status(file_id: str, user=Depends(get_verified_user)):
 
 @router.post("/pageindex/search/candidates")
 async def pageindex_search_candidates(
+    request: Request,
     form_data: PageIndexSearchCandidatesForm,
     user=Depends(get_verified_user),
 ):
@@ -2764,29 +2776,55 @@ async def pageindex_search_candidates(
                 detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
             )
 
-    result = PageIndexing.search_candidate_documents(
+    # Build the scoped file-id set for filtering (access-checked below).
+    allowed_file_ids: list[str] | None = None
+    if form_data.file_ids:
+        allowed_file_ids = [
+            fid for fid in form_data.file_ids if has_access_to_file(fid, "read", user)
+        ]
+
+    # Inject embedding function so the semantic search can embed the query.
+    if request.app.state.EMBEDDING_FUNCTION is not None:
+        from open_webui.retrieval import pageindex_semantic  # noqa: PLC0415
+
+        pageindex_semantic.set_embedding_function(
+            lambda query, prefix=None: request.app.state.EMBEDDING_FUNCTION(
+                query, prefix=prefix
+            )
+        )
+
+    result = await PageIndexing.search_candidate_documents_semantic(
         query=form_data.query,
         user_id=user.id,
         knowledge_id=knowledge_id,
+        file_ids=allowed_file_ids,
         limit=form_data.limit or 10,
     )
 
-    if form_data.file_ids:
-        allowed_file_ids = {
-            file_id
-            for file_id in form_data.file_ids
-            if has_access_to_file(file_id, "read", user)
-        }
-        result.items = [item for item in result.items if item.file_id in allowed_file_ids]
+    # Safety post-filter: ensure no out-of-scope results slip through.
+    if allowed_file_ids is not None:
+        allowed_set = set(allowed_file_ids)
+        result.items = [item for item in result.items if item.file_id in allowed_set]
 
     return result
 
 
 @router.post("/pageindex/query")
 async def pageindex_query(
+    request: Request,
     form_data: PageIndexQueryForm,
     user=Depends(get_verified_user),
 ):
+    # Inject embedding function so candidate search uses semantic vectors.
+    if request.app.state.EMBEDDING_FUNCTION is not None:
+        from open_webui.retrieval import pageindex_semantic  # noqa: PLC0415
+
+        pageindex_semantic.set_embedding_function(
+            lambda query, prefix=None: request.app.state.EMBEDDING_FUNCTION(
+                query, prefix=prefix
+            )
+        )
+
     file_ids = list(form_data.file_ids or [])
     if form_data.file_id:
         file_ids.append(form_data.file_id)
@@ -2887,6 +2925,69 @@ async def pageindex_tree_by_document(document_id: str, user=Depends(get_verified
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
     return tree_data
+
+
+@router.delete("/pageindex/documents/{file_id}")
+async def pageindex_delete_uploaded_document(
+    file_id: str,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    file = Files.get_file_by_id(file_id, db=db)
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if not (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(file_id, "write", user, db=db)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    # Keep behavior aligned with /files/{id} deletion so KB relations and
+    # vector entries are removed together with the uploaded file.
+    knowledges = Knowledges.get_knowledges_by_file_id(file_id, db=db)
+    for knowledge in knowledges:
+        Knowledges.remove_file_from_knowledge_by_id(knowledge.id, file_id, db=db)
+        try:
+            VECTOR_DB_CLIENT.delete(
+                collection_name=knowledge.id, filter={"file_id": file_id}
+            )
+            if file.hash:
+                VECTOR_DB_CLIENT.delete(
+                    collection_name=knowledge.id, filter={"hash": file.hash}
+                )
+        except Exception as e:
+            log.debug(f"KB embedding cleanup for {knowledge.id}: {e}")
+
+    deleted = Files.delete_file_by_id(file_id, db=db)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("Error deleting file"),
+        )
+
+    try:
+        Storage.delete_file(file.path)
+        VECTOR_DB_CLIENT.delete(collection_name=f"file-{file_id}")
+    except Exception as e:
+        log.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("Error deleting files"),
+        )
+
+    return {
+        "status": True,
+        "file_id": file_id,
+        "message": "Uploaded document deleted successfully",
+    }
 
 
 ####################################

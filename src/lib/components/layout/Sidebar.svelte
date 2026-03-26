@@ -64,6 +64,7 @@
 	import Sidebar from '../icons/Sidebar.svelte';
 	import PinnedModelList from './Sidebar/PinnedModelList.svelte';
 	import Note from '../icons/Note.svelte';
+	import Document from '../icons/Document.svelte';
 	import { slide } from 'svelte/transition';
 	import HotkeyHint from '../common/HotkeyHint.svelte';
 	import { is_default_mode } from '$lib/app-mode';
@@ -990,6 +991,25 @@
 							</div>
 							<HotkeyHint name="search" className=" group-hover:visible invisible" />
 						</button>
+					</div>
+
+					<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
+						<a
+							id="sidebar-documents-button"
+							class="grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+							href="/documents"
+							on:click={itemClickHandler}
+							draggable="false"
+							aria-label={$i18n.t('Documents')}
+						>
+							<div class="self-center">
+								<Document className="size-4.5" strokeWidth="2" />
+							</div>
+
+							<div class="flex self-center translate-y-[0.5px]">
+								<div class=" self-center text-sm font-primary">{$i18n.t('Documents')}</div>
+							</div>
+						</a>
 					</div>
 
 					{#if $is_default_mode && ($config?.features?.enable_notes ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true))}
