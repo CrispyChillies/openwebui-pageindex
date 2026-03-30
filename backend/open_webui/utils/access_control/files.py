@@ -1,6 +1,7 @@
 import logging
 from typing import Optional, Any
 
+from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.models.users import UserModel
 from open_webui.models.files import Files
 from open_webui.models.knowledge import Knowledges
@@ -27,6 +28,9 @@ def has_access_to_file(
     NOTE: This does NOT check direct file ownership — callers should check
     file.user_id == user.id separately before calling this.
     """
+    if user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL:
+        return True
+
     file = Files.get_file_by_id(file_id, db=db)
     log.debug(f"Checking if user has {access_type} access to file")
     if not file:

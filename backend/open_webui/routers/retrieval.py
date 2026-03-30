@@ -92,6 +92,7 @@ from open_webui.retrieval.utils import (
 )
 from open_webui.retrieval.pageindex_service import PageIndexing
 from open_webui.retrieval.pageindex_chat import PageIndexChat
+from open_webui.retrieval.pageindex_selector.service import PageIndexSelectorService
 from open_webui.storage.pageindex import PageIndexes
 from open_webui.models.access_grants import AccessGrants
 from open_webui.retrieval.vector.utils import filter_metadata
@@ -103,6 +104,7 @@ from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_permission
 
 from open_webui.config import (
+    BYPASS_ADMIN_ACCESS_CONTROL,
     ENV,
     RAG_EMBEDDING_MODEL_AUTO_UPDATE,
     RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
@@ -2634,6 +2636,61 @@ class PageIndexQueryForm(BaseModel):
     qa_model: Optional[str] = None
 
 
+class SelectorIngestForm(BaseModel):
+    file_id: str
+    knowledge_id: Optional[str] = None
+    force_reindex: Optional[bool] = False
+    index_options: Optional[dict] = None
+
+
+class SelectorBulkIngestForm(BaseModel):
+    file_ids: list[str]
+    knowledge_id: Optional[str] = None
+    force_reindex: Optional[bool] = False
+    index_options: Optional[dict] = None
+
+
+class SelectorDocumentListForm(BaseModel):
+    knowledge_id: Optional[str] = None
+    status: Optional[str] = None
+    limit: Optional[int] = 100
+    offset: Optional[int] = 0
+
+
+class SelectorDocSearchForm(BaseModel):
+    query: str
+    knowledge_id: Optional[str] = None
+    file_ids: Optional[list[str]] = None
+    limit: Optional[int] = 10
+
+
+class SelectorChunkSearchForm(BaseModel):
+    query: str
+    knowledge_id: Optional[str] = None
+    file_ids: Optional[list[str]] = None
+    limit: Optional[int] = 20
+
+
+class SelectorMetadataUpdateForm(BaseModel):
+    doc_title: Optional[str] = None
+    doc_description: Optional[str] = None
+    source_type: Optional[str] = None
+
+
+class SelectorReplaceChunksForm(BaseModel):
+    chunk_texts: list[str]
+
+
+def _set_selector_embedding(request: Request) -> None:
+    if request.app.state.EMBEDDING_FUNCTION is None:
+        return
+    PageIndexSelectorService.set_embedding_function(
+        lambda query, prefix=None: request.app.state.EMBEDDING_FUNCTION(
+            query, prefix=prefix
+        )
+    )
+
+
 @router.post("/query/collection")
 async def query_collection_handler(
     request: Request,
@@ -2700,6 +2757,27 @@ async def query_collection_handler(
 
 @router.post("/pageindex/index")
 async def pageindex_index_file(
+    form_data: PageIndexIndexForm,
+    user=Depends(get_verified_user),
+):
+    if not has_access_to_file(form_data.file_id, "read", user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    result = await run_in_threadpool(
+        PageIndexing.build_tree_index_by_file_id,
+        form_data.file_id,
+        form_data.knowledge_id,
+        bool(form_data.force_reindex),
+        form_data.index_options,
+    )
+    return result
+
+
+@router.post("/pageindex/pipeline/index")
+async def pageindex_pipeline_index_file(
     request: Request,
     form_data: PageIndexIndexForm,
     user=Depends(get_verified_user),
@@ -2710,15 +2788,7 @@ async def pageindex_index_file(
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
-    # Inject embedding function so the semantic indexer can embed chunks.
-    if request.app.state.EMBEDDING_FUNCTION is not None:
-        from open_webui.retrieval import pageindex_semantic  # noqa: PLC0415
-
-        pageindex_semantic.set_embedding_function(
-            lambda query, prefix=None: request.app.state.EMBEDDING_FUNCTION(
-                query, prefix=prefix
-            )
-        )
+    _set_selector_embedding(request)
 
     result = await run_in_threadpool(
         PageIndexing.index_file_by_id,
@@ -2727,7 +2797,10 @@ async def pageindex_index_file(
         bool(form_data.force_reindex),
         form_data.index_options,
     )
-    return result
+    return {
+        "status": True,
+        "result": result,
+    }
 
 
 @router.get("/pageindex/status/{file_id}")
@@ -2738,7 +2811,19 @@ async def pageindex_status(file_id: str, user=Depends(get_verified_user)):
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
-    status_data = PageIndexing.get_indexing_status(file_id=file_id, user_id=user.id)
+    status_user_id = user.id
+    if user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL:
+        file = Files.get_file_by_id(file_id)
+        if not file:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=ERROR_MESSAGES.NOT_FOUND,
+            )
+        status_user_id = file.user_id
+
+    status_data = PageIndexing.get_indexing_status(
+        file_id=file_id, user_id=status_user_id
+    )
     if not status_data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2987,6 +3072,390 @@ async def pageindex_delete_uploaded_document(
         "status": True,
         "file_id": file_id,
         "message": "Uploaded document deleted successfully",
+    }
+
+
+@router.post("/pageindex/selector/ingest")
+async def selector_ingest_document(
+    request: Request,
+    form_data: SelectorIngestForm,
+    user=Depends(get_verified_user),
+):
+    if not has_access_to_file(form_data.file_id, "read", user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    _set_selector_embedding(request)
+
+    result = await run_in_threadpool(
+        PageIndexing.ingest_selector_by_file_id,
+        form_data.file_id,
+        form_data.knowledge_id,
+        bool(form_data.force_reindex),
+        form_data.index_options,
+    )
+    return {
+        "status": True,
+        "result": result,
+    }
+
+
+@router.post("/pageindex/selector/ingest/bulk")
+async def selector_ingest_documents_bulk(
+    request: Request,
+    form_data: SelectorBulkIngestForm,
+    user=Depends(get_verified_user),
+):
+    _set_selector_embedding(request)
+
+    results = []
+    for file_id in form_data.file_ids:
+        if not has_access_to_file(file_id, "read", user):
+            results.append(
+                {
+                    "file_id": file_id,
+                    "indexed": False,
+                    "status": "forbidden",
+                    "message": "Access prohibited",
+                }
+            )
+            continue
+
+        indexed = await run_in_threadpool(
+            PageIndexing.ingest_selector_by_file_id,
+            file_id,
+            form_data.knowledge_id,
+            bool(form_data.force_reindex),
+            form_data.index_options,
+        )
+        results.append(indexed)
+
+    return {
+        "status": True,
+        "results": results,
+    }
+
+
+@router.get("/pageindex/selector/documents/{document_id}")
+async def selector_get_document(
+    document_id: str,
+    user=Depends(get_verified_user),
+):
+    document = PageIndexes.get_document_by_id(document_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if not (
+        document.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(document.file_id, "read", user)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    chunks = PageIndexSelectorService.list_selector_chunks(document_id, limit=200)
+    return {
+        "document": document,
+        "total_chunks": len(chunks),
+    }
+
+
+@router.post("/pageindex/selector/documents/list")
+async def selector_list_documents(
+    form_data: SelectorDocumentListForm,
+    user=Depends(get_verified_user),
+):
+    documents = PageIndexes.list_documents(
+        user_id=user.id,
+        knowledge_id=form_data.knowledge_id,
+        status=form_data.status,
+        limit=form_data.limit or 100,
+        offset=form_data.offset or 0,
+    )
+    return {
+        "items": documents,
+        "count": len(documents),
+    }
+
+
+@router.get("/pageindex/selector/documents/{document_id}/chunks")
+async def selector_list_chunks(
+    document_id: str,
+    limit: int = Query(default=200, ge=1, le=2000),
+    user=Depends(get_verified_user),
+):
+    document = PageIndexes.get_document_by_id(document_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if not (
+        document.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(document.file_id, "read", user)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    chunks = PageIndexSelectorService.list_selector_chunks(document_id, limit=limit)
+    return {
+        "document_id": document_id,
+        "total_chunks": len(chunks),
+        "chunks": chunks,
+    }
+
+
+@router.get("/pageindex/selector/chunks/{chunk_id}")
+async def selector_get_chunk(chunk_id: str, user=Depends(get_verified_user)):
+    chunk = PageIndexSelectorService.get_selector_chunk(chunk_id)
+    if not chunk:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    file_id = (chunk.get("metadata") or {}).get("file_id")
+    if not file_id or not has_access_to_file(file_id, "read", user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+    return chunk
+
+
+@router.post("/pageindex/selector/search/documents")
+async def selector_search_documents(
+    request: Request,
+    form_data: SelectorDocSearchForm,
+    user=Depends(get_verified_user),
+):
+    _set_selector_embedding(request)
+
+    allowed_file_ids = None
+    if form_data.file_ids:
+        allowed_file_ids = [
+            fid for fid in form_data.file_ids if has_access_to_file(fid, "read", user)
+        ]
+
+    result = await PageIndexSelectorService.search_candidate_documents(
+        query=form_data.query,
+        user_id=user.id,
+        knowledge_id=form_data.knowledge_id,
+        file_ids=allowed_file_ids,
+        limit=form_data.limit or 10,
+    )
+    return {
+        "query": result.query,
+        "query_variants_used": result.query_variants_used,
+        "matched_documents": result.matched_documents,
+        "matched_chunks": result.matched_chunks,
+        "total_chunks": result.total_chunks,
+        "confidence": result.confidence,
+        "items": result.items,
+        "score_breakdown": result.score_breakdown,
+        "matched_documents_debug": [
+            {
+                "document_id": item.document_id,
+                "score": item.score,
+                "score_breakdown": item.score_breakdown,
+                "matched_chunks": item.matched_chunks,
+            }
+            for item in result.items
+        ],
+        "matched_chunks_debug": [
+            {
+                "document_id": item.document_id,
+                "chunks": item.matched_chunk_refs,
+            }
+            for item in result.items
+        ],
+    }
+
+
+@router.post("/pageindex/selector/search/chunks")
+async def selector_search_chunks(
+    request: Request,
+    form_data: SelectorChunkSearchForm,
+    user=Depends(get_verified_user),
+):
+    _set_selector_embedding(request)
+
+    allowed_file_ids = None
+    if form_data.file_ids:
+        allowed_file_ids = [
+            fid for fid in form_data.file_ids if has_access_to_file(fid, "read", user)
+        ]
+
+    chunks = await PageIndexSelectorService.search_selector_chunks(
+        query=form_data.query,
+        user_id=user.id,
+        knowledge_id=form_data.knowledge_id,
+        file_ids=allowed_file_ids,
+        limit=form_data.limit or 20,
+    )
+
+    return {
+        "query": form_data.query,
+        "query_variants_used": [form_data.query],
+        "matched_chunks": len(chunks),
+        "items": chunks,
+    }
+
+
+@router.post("/pageindex/selector/documents/{document_id}/refresh")
+async def selector_refresh_document(
+    request: Request,
+    document_id: str,
+    user=Depends(get_verified_user),
+):
+    document = PageIndexes.get_document_by_id(document_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    if not has_access_to_file(document.file_id, "read", user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    _set_selector_embedding(request)
+
+    result = await run_in_threadpool(
+        PageIndexing.index_file_by_id,
+        document.file_id,
+        document.knowledge_id,
+        True,
+        document.index_options,
+    )
+    return {
+        "status": True,
+        "result": result,
+    }
+
+
+@router.patch("/pageindex/selector/documents/{document_id}/metadata")
+async def selector_update_document_metadata(
+    document_id: str,
+    form_data: SelectorMetadataUpdateForm,
+    user=Depends(get_verified_user),
+):
+    document = PageIndexes.update_document_metadata(
+        document_id=document_id,
+        user_id=user.id,
+        doc_title=form_data.doc_title,
+        doc_description=form_data.doc_description,
+        source_type=form_data.source_type,
+    )
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    return {
+        "status": True,
+        "document": document,
+    }
+
+
+@router.put("/pageindex/selector/documents/{document_id}/chunks")
+async def selector_replace_chunks(
+    request: Request,
+    document_id: str,
+    form_data: SelectorReplaceChunksForm,
+    user=Depends(get_verified_user),
+):
+    document = PageIndexes.get_document_by_id(document_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    if not has_access_to_file(document.file_id, "write", user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    _set_selector_embedding(request)
+
+    replaced_count = await PageIndexSelectorService.replace_selector_chunks(
+        document_id=document_id,
+        user_id=user.id,
+        chunk_texts=form_data.chunk_texts,
+    )
+    return {
+        "status": True,
+        "document_id": document_id,
+        "total_chunks": replaced_count,
+    }
+
+
+@router.delete("/pageindex/selector/documents/{document_id}")
+async def selector_delete_document_vectors(
+    document_id: str,
+    user=Depends(get_verified_user),
+):
+    document = PageIndexes.get_document_by_id(document_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    if not has_access_to_file(document.file_id, "write", user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    PageIndexSelectorService.delete_selector_document(document_id)
+    return {
+        "status": True,
+        "document_id": document_id,
+    }
+
+
+@router.delete("/pageindex/selector/chunks/{chunk_id}")
+async def selector_delete_chunk(chunk_id: str, user=Depends(get_verified_user)):
+    chunk = PageIndexSelectorService.get_selector_chunk(chunk_id)
+    if not chunk:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    file_id = (chunk.get("metadata") or {}).get("file_id")
+    if not file_id or not has_access_to_file(file_id, "write", user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    PageIndexSelectorService.delete_selector_chunk(chunk_id)
+    return {
+        "status": True,
+        "chunk_id": chunk_id,
+    }
+
+
+@router.delete("/pageindex/selector/collection/clear")
+async def selector_clear_collection(user=Depends(get_admin_user)):
+    PageIndexSelectorService.clear_selector_collections()
+    return {
+        "status": True,
+        "message": "Selector vector collections cleared",
     }
 
 

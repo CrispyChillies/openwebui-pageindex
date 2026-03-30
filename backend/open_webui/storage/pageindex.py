@@ -193,6 +193,79 @@ class PageIndexStore:
                 return PageIndexDocumentModel.model_validate(doc)
             return None
 
+    def list_documents(
+        self,
+        user_id: Optional[str] = None,
+        knowledge_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+        db: Optional[Session] = None,
+    ) -> list[PageIndexDocumentModel]:
+        with get_db_context(db) as db:
+            query = db.query(PageIndexDocument)
+            if user_id:
+                query = query.filter(PageIndexDocument.user_id == user_id)
+            if knowledge_id:
+                query = query.filter(PageIndexDocument.knowledge_id == knowledge_id)
+            if status:
+                query = query.filter(PageIndexDocument.status == status)
+
+            rows = (
+                query.order_by(PageIndexDocument.updated_at.desc())
+                .offset(max(0, int(offset)))
+                .limit(max(1, min(int(limit), 500)))
+                .all()
+            )
+            return [PageIndexDocumentModel.model_validate(row) for row in rows]
+
+    def update_document_metadata(
+        self,
+        document_id: str,
+        user_id: Optional[str] = None,
+        doc_title: Optional[str] = None,
+        doc_description: Optional[str] = None,
+        source_type: Optional[str] = None,
+        db: Optional[Session] = None,
+    ) -> Optional[PageIndexDocumentModel]:
+        with get_db_context(db) as db:
+            row = db.get(PageIndexDocument, document_id)
+            if not row:
+                return None
+            row_user_id = str(getattr(row, "user_id", "") or "")
+            if user_id and row_user_id != user_id:
+                return None
+
+            if doc_title is not None:
+                setattr(row, "doc_title", doc_title)
+            if doc_description is not None:
+                setattr(row, "doc_description", doc_description)
+            if source_type is not None:
+                setattr(row, "source_type", source_type)
+            setattr(row, "updated_at", now_epoch())
+
+            db.commit()
+            db.refresh(row)
+            return PageIndexDocumentModel.model_validate(row)
+
+    def delete_document(
+        self,
+        document_id: str,
+        user_id: Optional[str] = None,
+        db: Optional[Session] = None,
+    ) -> bool:
+        with get_db_context(db) as db:
+            row = db.get(PageIndexDocument, document_id)
+            if not row:
+                return False
+            row_user_id = str(getattr(row, "user_id", "") or "")
+            if user_id and row_user_id != user_id:
+                return False
+
+            db.delete(row)
+            db.commit()
+            return True
+
     def get_indexing_status_by_file_id(
         self,
         file_id: str,

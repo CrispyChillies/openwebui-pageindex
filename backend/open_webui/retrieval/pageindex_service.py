@@ -16,6 +16,10 @@ from open_webui.models.pageindex import (
 from open_webui.storage.pageindex import PageIndexes
 from open_webui.storage.provider import Storage
 from open_webui.utils.misc import calculate_sha256
+from open_webui.retrieval.pageindex_selector.service import (
+    HEADER_COLLECTION_NAME,
+    PageIndexSelectorService,
+)
 
 
 log = logging.getLogger(__name__)
@@ -177,14 +181,36 @@ class PageIndexService:
             page_list=page_list,
         )
 
-    def index_file_by_id(
+    @staticmethod
+    def _get_file_and_existing_doc(file_id: str):
+        file = Files.get_file_by_id(file_id)
+        if not file:
+            return None, None
+        user_id = file.user_id
+        existing_doc = PageIndexes.get_document_by_file_id(file_id=file.id, user_id=user_id)
+        return file, existing_doc
+
+    @staticmethod
+    def _selector_vectors_exist(document_id: str) -> bool:
+        chunk_rows = PageIndexSelectorService.list_selector_chunks(document_id=document_id, limit=1)
+        if chunk_rows:
+            return True
+
+        header_rows = PageIndexSelectorService._query_collection(  # noqa: SLF001
+            HEADER_COLLECTION_NAME,
+            {"document_id": document_id},
+            limit=1,
+        )
+        return bool(header_rows)
+
+    def build_tree_index_by_file_id(
         self,
         file_id: str,
         knowledge_id: Optional[str] = None,
         force_reindex: bool = False,
         index_options: Optional[dict] = None,
     ) -> PageIndexIndexResult:
-        file = Files.get_file_by_id(file_id)
+        file, existing_doc = self._get_file_and_existing_doc(file_id)
         if not file:
             return PageIndexIndexResult(
                 indexed=False,
@@ -202,13 +228,14 @@ class PageIndexService:
             )
 
         user_id = file.user_id
-        existing_doc = PageIndexes.get_document_by_file_id(file_id=file.id, user_id=user_id)
 
         try:
             local_file_path = Storage.get_file(file.path)
             source_hash = file.hash or calculate_sha256(local_file_path, chunk_size=1024 * 1024)
             source_type = self._detect_source_type(local_file_path, file.filename)
-            resolved_knowledge_id = knowledge_id if knowledge_id is not None else (existing_doc.knowledge_id if existing_doc else None)
+            resolved_knowledge_id = knowledge_id if knowledge_id is not None else (
+                existing_doc.knowledge_id if existing_doc else None
+            )
 
             if (
                 existing_doc
@@ -220,31 +247,37 @@ class PageIndexService:
                     indexed=False,
                     skipped=True,
                     status="ready",
-                    message="Skipped reindex: source hash unchanged",
+                    message="Skipped tree reindex: source hash unchanged",
                     document_id=existing_doc.id,
                     file_id=file.id,
                 )
 
-            # ── Step 1: Mark as processing ───────────────────────────────────
             transition_form = PageIndexDocumentUpsertForm(
                 file_id=file.id,
                 knowledge_id=resolved_knowledge_id,
                 user_id=user_id,
-                doc_title=(existing_doc.doc_title if existing_doc and existing_doc.doc_title else file.filename),
+                doc_title=(
+                    existing_doc.doc_title
+                    if existing_doc and existing_doc.doc_title
+                    else file.filename
+                ),
                 doc_description=(existing_doc.doc_description if existing_doc else None),
                 source_type=source_type,
                 source_hash=source_hash,
                 status="processing",
                 tree_json=(existing_doc.tree_json if existing_doc else None),
                 generated_at=(existing_doc.generated_at if existing_doc else None),
-                index_options=index_options if index_options is not None else (existing_doc.index_options if existing_doc else None),
+                index_options=(
+                    index_options
+                    if index_options is not None
+                    else (existing_doc.index_options if existing_doc else None)
+                ),
                 error_message=None,
             )
             processing_doc = PageIndexes.upsert_document(transition_form)
             if not processing_doc:
                 raise RuntimeError("Failed to transition PageIndex status to processing")
 
-            # ── Step 2: Build PageIndex tree ──────────────────────────────────
             effective_options = self._build_index_options(index_options, source_type=source_type)
             if source_type == "pdf":
                 tree_data = self._run_pdf_indexing(local_file_path, effective_options)
@@ -254,28 +287,15 @@ class PageIndexService:
             if not isinstance(tree_data, dict):
                 raise RuntimeError("PageIndex indexing returned non-dict tree data")
 
-            doc_title = tree_data.get("doc_name") or file.filename
-            doc_description = tree_data.get("doc_description")
-
-            # ── Step 2.5: Extract raw page list for semantic chunking ─────────
-            # For PDFs, raw page text per node gives much richer embeddings
-            # than summaries alone.  This is a best-effort step: failure is
-            # logged and the semantic indexer falls back to summary-only.
-            page_list = self._extract_page_list(local_file_path, source_type)
-
-            # ── Step 3: Persist tree and nodes ────────────────────────────────
-            # We persist the tree first so the document record exists in the DB
-            # before attempting vector upsert.  If vector upsert fails the
-            # document is marked failed and the tree is preserved for debugging.
             save_form = PageIndexDocumentUpsertForm(
                 file_id=file.id,
                 knowledge_id=resolved_knowledge_id,
                 user_id=user_id,
-                doc_title=doc_title,
-                doc_description=doc_description,
+                doc_title=tree_data.get("doc_name") or file.filename,
+                doc_description=tree_data.get("doc_description"),
                 source_type=source_type,
                 source_hash=source_hash,
-                status="processing",  # still processing; semantic step not done
+                status="ready",
                 tree_json=tree_data,
                 generated_at=now_epoch(),
                 index_options=effective_options,
@@ -285,51 +305,15 @@ class PageIndexService:
             if not saved_doc:
                 raise RuntimeError("Failed to persist PageIndex tree and nodes")
 
-            document_id = saved_doc.id
-
-            # ── Step 4: Semantic chunk embedding and vector upsert ────────────
-            try:
-                chunk_count = asyncio.run(
-                    self._run_semantic_indexing(
-                        document_id=document_id,
-                        file_id=file.id,
-                        knowledge_id=resolved_knowledge_id,
-                        user_id=user_id,
-                        tree_data=tree_data,
-                        source_type=source_type,
-                        page_list=page_list,
-                    )
-                )
-                log.info(
-                    f"PageIndex semantic indexing complete: "
-                    f"document_id={document_id} chunks={chunk_count}"
-                )
-            except Exception as sem_err:
-                # Semantic failure is logged and propagated; document is marked failed.
-                log.exception(
-                    f"PageIndex semantic indexing failed for document_id={document_id}: {sem_err}"
-                )
-                raise RuntimeError(
-                    f"Semantic chunk indexing failed: {sem_err}"
-                ) from sem_err
-
-            # ── Step 5: Mark as ready ─────────────────────────────────────────
-            PageIndexes.update_document_status(
-                file_id=file.id,
-                user_id=user_id,
-                status="ready",
-                knowledge_id=resolved_knowledge_id,
-            )
-
             return PageIndexIndexResult(
                 indexed=True,
                 status="ready",
-                message="PageIndex indexing completed",
-                document_id=document_id,
+                message="PageIndex tree indexing completed",
+                document_id=saved_doc.id,
                 file_id=file.id,
             )
         except Exception as e:
-            log.exception(f"PageIndex indexing failed for file_id={file_id}: {e}")
+            log.exception(f"PageIndex tree indexing failed for file_id={file_id}: {e}")
             PageIndexes.update_document_status(
                 file_id=file.id,
                 user_id=user_id,
@@ -344,6 +328,154 @@ class PageIndexService:
                 document_id=(existing_doc.id if existing_doc else None),
                 file_id=file.id,
             )
+
+    def ingest_selector_by_file_id(
+        self,
+        file_id: str,
+        knowledge_id: Optional[str] = None,
+        force_reindex: bool = False,
+        index_options: Optional[dict] = None,
+    ) -> PageIndexIndexResult:
+        file, existing_doc = self._get_file_and_existing_doc(file_id)
+        if not file:
+            return PageIndexIndexResult(
+                indexed=False,
+                status="failed",
+                message=f"File not found: {file_id}",
+                file_id=file_id,
+            )
+
+        if not existing_doc:
+            return PageIndexIndexResult(
+                indexed=False,
+                status="failed",
+                message="No PageIndex tree found for file. Run /pageindex/index first.",
+                file_id=file.id,
+            )
+
+        if existing_doc.status != "ready":
+            return PageIndexIndexResult(
+                indexed=False,
+                status="failed",
+                message=f"PageIndex document is not ready: {existing_doc.status}",
+                document_id=existing_doc.id,
+                file_id=file.id,
+            )
+
+        if not force_reindex and self._selector_vectors_exist(existing_doc.id):
+            return PageIndexIndexResult(
+                indexed=False,
+                skipped=True,
+                status="ready",
+                message="Skipped selector vector ingest: vectors already exist",
+                document_id=existing_doc.id,
+                file_id=file.id,
+            )
+
+        try:
+            local_file_path = Storage.get_file(file.path)
+            source_type = existing_doc.source_type or self._detect_source_type(
+                local_file_path, file.filename
+            )
+            page_list = self._extract_page_list(local_file_path, source_type)
+            full_text: Optional[str] = None
+            if source_type in ("md", "markdown"):
+                with open(local_file_path, "r", encoding="utf-8") as f:
+                    full_text = f.read()
+            elif source_type == "pdf" and not page_list:
+                raise RuntimeError("Failed to extract PDF text for selector vector ingest")
+
+            resolved_knowledge_id = (
+                knowledge_id if knowledge_id is not None else existing_doc.knowledge_id
+            )
+
+            if resolved_knowledge_id != existing_doc.knowledge_id or index_options is not None:
+                PageIndexes.upsert_document(
+                    PageIndexDocumentUpsertForm(
+                        file_id=file.id,
+                        knowledge_id=resolved_knowledge_id,
+                        user_id=existing_doc.user_id,
+                        doc_title=existing_doc.doc_title,
+                        doc_description=existing_doc.doc_description,
+                        source_type=source_type,
+                        source_hash=existing_doc.source_hash,
+                        status=existing_doc.status,
+                        tree_json=existing_doc.tree_json,
+                        generated_at=existing_doc.generated_at,
+                        index_options=(
+                            index_options
+                            if index_options is not None
+                            else existing_doc.index_options
+                        ),
+                        error_message=existing_doc.error_message,
+                    )
+                )
+
+            chunk_count = asyncio.run(
+                PageIndexSelectorService.index_source_chunks(
+                    document_id=existing_doc.id,
+                    file_id=file.id,
+                    knowledge_id=resolved_knowledge_id,
+                    user_id=existing_doc.user_id,
+                    source_type=source_type,
+                    file_name=file.filename,
+                    doc_title=existing_doc.doc_title,
+                    doc_description=existing_doc.doc_description,
+                    page_list=page_list,
+                    full_text=full_text,
+                )
+            )
+
+            return PageIndexIndexResult(
+                indexed=True,
+                status="ready",
+                message=f"Selector vector indexing completed ({chunk_count} chunks)",
+                document_id=existing_doc.id,
+                file_id=file.id,
+            )
+        except Exception as e:
+            log.exception(f"Selector vector indexing failed for file_id={file_id}: {e}")
+            return PageIndexIndexResult(
+                indexed=False,
+                status="failed",
+                message=str(e),
+                document_id=existing_doc.id,
+                file_id=file.id,
+            )
+
+    def index_file_by_id(
+        self,
+        file_id: str,
+        knowledge_id: Optional[str] = None,
+        force_reindex: bool = False,
+        index_options: Optional[dict] = None,
+    ) -> PageIndexIndexResult:
+        tree_result = self.build_tree_index_by_file_id(
+            file_id=file_id,
+            knowledge_id=knowledge_id,
+            force_reindex=force_reindex,
+            index_options=index_options,
+        )
+        if tree_result.status != "ready":
+            return tree_result
+
+        selector_result = self.ingest_selector_by_file_id(
+            file_id=file_id,
+            knowledge_id=knowledge_id,
+            force_reindex=force_reindex,
+            index_options=index_options,
+        )
+        if selector_result.status != "ready":
+            return selector_result
+
+        return PageIndexIndexResult(
+            indexed=bool(tree_result.indexed or selector_result.indexed),
+            skipped=bool(tree_result.skipped and selector_result.skipped),
+            status="ready",
+            message="PageIndex tree and selector vector indexing completed",
+            document_id=selector_result.document_id or tree_result.document_id,
+            file_id=file_id,
+        )
 
     def get_indexing_status(self, file_id: str, user_id: Optional[str] = None) -> Optional[PageIndexStatusResponse]:
         return PageIndexes.get_indexing_status_by_file_id(file_id=file_id, user_id=user_id)

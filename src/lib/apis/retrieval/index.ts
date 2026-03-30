@@ -452,7 +452,7 @@ type PageIndexIndexPayload = {
 export const pageIndexIndexFile = async (token: string, payload: PageIndexIndexPayload) => {
 	let error = null;
 
-	const res = await fetch(`${RETRIEVAL_API_BASE_URL}/pageindex/index`, {
+	const res = await fetch(`${RETRIEVAL_API_BASE_URL}/pageindex/pipeline/index`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',

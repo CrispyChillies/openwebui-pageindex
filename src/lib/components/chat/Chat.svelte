@@ -475,7 +475,7 @@
 						message.statusHistory = [data];
 					}
 				} else if (type === 'chat:completion') {
-					chatCompletionEventHandler(data, message, event.chat_id);
+					await chatCompletionEventHandler(data, message, event.chat_id);
 				} else if (type === 'chat:tasks:cancel') {
 					taskIds = null;
 					const responseMessage = history.messages[history.currentId];
@@ -597,6 +597,7 @@
 				}
 
 				history.messages[event.message_id] = message;
+				history = history;
 			}
 		}
 	};
@@ -1615,7 +1616,7 @@
 			await handleOpenAIError(error, message);
 		}
 
-		if (sources && !message?.sources) {
+		if (sources) {
 			message.sources = sources;
 		}
 
@@ -2530,11 +2531,25 @@
 					Boolean($settings?.splitLargeChunks ?? false)
 				);
 				for await (const update of textStream) {
-					const { value, done, sources, error, usage } = update;
+					const { value, done, sources, pageindex, error, usage } = update;
 					if (error || done) {
 						generating = false;
 						generationController = null;
 						break;
+					}
+
+					if (sources) {
+						message.sources = sources;
+						history.messages[messageId] = message;
+						history = history;
+						continue;
+					}
+
+					if (pageindex) {
+						message.pageindex = pageindex;
+						history.messages[messageId] = message;
+						history = history;
+						continue;
 					}
 
 					if (mergedResponse.content == '' && value == '\n') {

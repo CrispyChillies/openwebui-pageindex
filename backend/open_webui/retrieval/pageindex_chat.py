@@ -61,6 +61,21 @@ class PageIndexChatService:
         return None
 
     @staticmethod
+    def _get_file_processing_state(file_id: str) -> Optional[str]:
+        file = Files.get_file_by_id(file_id)
+        if not file:
+            return None
+        data = file.data or {}
+        return data.get("status")
+
+    @staticmethod
+    def _is_file_indexing_in_progress(file_id: str) -> bool:
+        return PageIndexChatService._get_file_processing_state(file_id) in {
+            "pending",
+            "processing",
+        }
+
+    @staticmethod
     def _select_best_result(results: list[dict]) -> Optional[dict]:
         if not results:
             return None
@@ -174,6 +189,14 @@ class PageIndexChatService:
                 "error": "Access denied to requested file",
             }
 
+        if PageIndexChatService._is_file_indexing_in_progress(file_id):
+            return {
+                "available": False,
+                "mode": "single_file",
+                "query": query,
+                "error": "Document indexing is still in progress. Please wait until indexing finishes.",
+            }
+
         status = PageIndexing.get_indexing_status(file_id=file_id, user_id=user.id)
         if (not status or status.status != "ready") and auto_index:
             PageIndexing.index_file_by_id(
@@ -238,6 +261,20 @@ class PageIndexChatService:
                 "mode": "multi_file",
                 "query": query,
                 "error": "No accessible files were provided",
+            }
+
+        processing_file_ids = [
+            file_id
+            for file_id in allowed_file_ids
+            if PageIndexChatService._is_file_indexing_in_progress(file_id)
+        ]
+        if processing_file_ids:
+            return {
+                "available": False,
+                "mode": "multi_file",
+                "query": query,
+                "error": "One or more selected documents are still indexing. Please wait until indexing finishes.",
+                "processing_file_ids": processing_file_ids,
             }
 
         if auto_index:
@@ -329,6 +366,22 @@ class PageIndexChatService:
                 "error": "Access denied to requested knowledge base",
             }
 
+        files = Knowledges.get_files_by_id(knowledge_id)
+        processing_file_ids = [
+            file.id
+            for file in files
+            if has_access_to_file(file.id, "read", user)
+            and PageIndexChatService._is_file_indexing_in_progress(file.id)
+        ]
+        if processing_file_ids:
+            return {
+                "available": False,
+                "mode": "knowledge",
+                "query": query,
+                "error": "One or more knowledge-base documents are still indexing. Please wait until indexing finishes.",
+                "processing_file_ids": processing_file_ids,
+            }
+
         candidates = PageIndexing.search_candidate_documents(
             query=query,
             user_id=user.id,
@@ -337,7 +390,6 @@ class PageIndexChatService:
         )
 
         if not candidates.items and auto_index:
-            files = Knowledges.get_files_by_id(knowledge_id)
             for file in files[: PageIndexChatService.MAX_AUTO_INDEX_KB_FILES]:
                 if has_access_to_file(file.id, "read", user):
                     PageIndexing.index_file_by_id(

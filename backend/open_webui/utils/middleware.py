@@ -1908,7 +1908,7 @@ async def chat_completion_files_handler(
                     query_text,
                     files,
                     user,
-                    True,
+                    False,
                     False,
                     5,
                     3,

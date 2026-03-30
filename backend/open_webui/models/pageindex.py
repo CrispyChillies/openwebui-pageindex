@@ -1,6 +1,6 @@
 import time
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, Index, String, Text, JSON, UniqueConstraint
@@ -157,16 +157,31 @@ class PageIndexCandidateDocument(BaseModel):
     user_id: str
     doc_title: Optional[str] = None
     doc_description: Optional[str] = None
+    file_name: Optional[str] = None
     score: float
     matched_nodes: int = 0
     # Additive semantic fields — None when using SQL token search fallback.
     semantic_score: Optional[float] = None
+    metadata_score: Optional[float] = None
+    exact_token_overlap_score: Optional[float] = None
+    evidence_coverage_score: Optional[float] = None
+    filename_score: Optional[float] = None
     matched_chunks: Optional[int] = None
+    matched_chunk_refs: Optional[list[dict[str, Any]]] = None
+    score_breakdown: Optional[dict[str, float]] = None
+    query_variants_used: Optional[list[str]] = None
+    confidence: Optional[str] = None
 
 
 class PageIndexCandidateSearchResponse(BaseModel):
     query: str
     items: list[PageIndexCandidateDocument]
+    query_variants_used: Optional[list[str]] = None
+    matched_documents: Optional[int] = None
+    matched_chunks: Optional[int] = None
+    total_chunks: Optional[int] = None
+    score_breakdown: Optional[dict[str, dict[str, float]]] = None
+    confidence: Optional[str] = None
 
 
 def new_pageindex_document_id() -> str:
